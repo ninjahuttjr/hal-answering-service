@@ -1,11 +1,32 @@
+# Core
 fastapi>=0.100.0
 uvicorn>=0.23.0
 websockets>=12.0
-numpy>=1.24.0
+numpy>=1.26.0
 soundfile>=0.12.0
-faster-whisper>=1.0.0
-chatterbox-tts
 openai>=1.0.0
 httpx>=0.24.0
 python-dotenv>=1.0.0
+
+# STT
+faster-whisper>=1.0.0
+
+# TTS — chatterbox-tts has broken install deps on Python 3.12+, so we install
+# it with --no-deps and list its actual runtime dependencies here.
+# See: https://github.com/resemble-ai/chatterbox/issues
+chatterbox-tts
+resemble-perth>=1.0.0
+librosa>=0.10.0
+diffusers>=0.25.0
+transformers>=4.40.0
+safetensors>=0.4.0
+accelerate>=0.25.0
+conformer>=0.3.0
+omegaconf>=2.3.0
+pyloudnorm>=0.1.0
+s3tokenizer>=0.2.0
+einops>=0.7.0
+numexpr>=2.8.0
+
+# Telephony
 signalwire

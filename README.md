@@ -70,7 +70,8 @@ cd hal-answering-service
 # Install PyTorch with CUDA first (see https://pytorch.org/get-started/locally/)
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-# Install dependencies
+# Install chatterbox-tts without its broken deps, then install everything
+pip install --no-deps chatterbox-tts
 pip install -r requirements.txt
 
 # Configure
@@ -82,6 +83,8 @@ python main.py
 ```
 
 On first run, models download automatically (~3 GB). Subsequent starts use cached models.
+
+> **Note:** `chatterbox-tts` on PyPI pins `numpy<1.26` which has no Python 3.12 wheels. Install it with `--no-deps` first -- `requirements.txt` includes all its actual runtime dependencies.
 
 ## Setup
 
@@ -98,9 +101,10 @@ Install PyTorch with CUDA support for your system. See [pytorch.org](https://pyt
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 ```
 
-Then install everything else:
+Then install chatterbox-tts without its broken dependency constraints, and install everything else:
 
 ```bash
+pip install --no-deps chatterbox-tts
 pip install -r requirements.txt
 ```
 
