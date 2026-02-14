@@ -576,7 +576,13 @@ class CallHandler:
             rec_offset = int((now - self._rec_wall_start) * SAMPLE_RATE_8K)
             self._rec_outbound.append((rec_offset, mulaw_bytes))
 
-            await self._send_audio(mulaw_bytes)
+            try:
+                await self._send_audio(mulaw_bytes)
+            except Exception:
+                log.debug("[%s] Silence prompt send failed (WebSocket closed)", self.call_sid)
+                self.speaking = False
+                self._bot_speak_start_time = 0.0
+                return
             log.info("[%s] Silence prompt sent: %s (%.1fs audio)",
                      self.call_sid, prompt_text, audio_duration)
 
