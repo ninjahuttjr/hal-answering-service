@@ -3,6 +3,7 @@
 # ── Suppress third-party warning noise before any imports ──
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning, module="diffusers")
 
 import os
@@ -22,7 +23,7 @@ log = logging.getLogger("hal")
 
 # Quiet down chatty third-party loggers
 for _logger_name in ("faster_whisper", "httpx", "httpcore", "uvicorn", "uvicorn.access",
-                      "uvicorn.error", "numexpr"):
+                      "uvicorn.error", "numexpr", "stt", "llm"):
     logging.getLogger(_logger_name).setLevel(logging.WARNING)
 
 
