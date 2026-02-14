@@ -1,4 +1,4 @@
-# SuperCaller
+# HAL Answering Service
 
 **A fully local AI phone screener.** Answers your calls as HAL 9000, collects the caller's name and reason, records the call, and sends you a push notification with a summary and full transcript.
 

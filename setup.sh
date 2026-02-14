@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SuperCaller — Setup Script
+# HAL Answering Service — Setup Script
 # Installs all dependencies in the correct order.
 #
 # Usage:
@@ -133,4 +133,4 @@ echo ""
 info "Setup complete! Next steps:"
 echo "  1. cp .env.example .env    # configure your settings"
 echo "  2. Start your LLM server   # e.g. LM Studio"
-echo "  3. python main.py          # start SuperCaller"
+echo "  3. python main.py          # start HAL"
