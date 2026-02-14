@@ -54,7 +54,7 @@ Audio to caller <---|---+                      |
 
 A real recorded call -- HAL picks up, screens the caller, and hangs up:
 
-<video src="recordings/example_call.mp4" controls></video>
+<video src="https://github.com/ninjahuttjr/hal-answering-service/releases/download/example-call/example_call.mp4" controls></video>
 
 ## Latency
 
