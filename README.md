@@ -50,6 +50,10 @@ Audio to caller <---|---+                      |
 - **Security** -- webhook signature validation, input truncation, XML escaping, prompt injection hardening
 - **Customizable personality** -- HAL 9000 is just the default. Change the system prompt in `prompts.py` and swap the voice WAV file to create any character you want
 
+## Example call
+
+Listen to a real recorded call: [`recordings/example_call.wav`](recordings/example_call.wav)
+
 ## Latency
 
 End-to-end latency from the caller finishing their sentence to hearing the AI respond runs under 1.5 seconds in typical conversation. Best observed round-trip is **649ms**, fully local, with voice cloning.
