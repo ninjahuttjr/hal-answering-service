@@ -57,7 +57,7 @@ Audio to caller <---|---+                      |
 | **Python** | 3.12+ |
 | **GPU** | NVIDIA with CUDA (Whisper + Chatterbox + VAD all run on GPU) |
 | **VRAM** | 16 GB+ recommended (Whisper large-v3-turbo + Chatterbox Turbo + Silero VAD ≈ 6 GB, plus your LLM) |
-| **SignalWire** | Account with a phone number ([signalwire.com](https://signalwire.com)) |
+| **SignalWire** | Account with a phone number ([signalwire.com](https://signalwire.com)) -- $0.50/mo for a number, ~$0.007/min for inbound calls |
 | **Local LLM** | [LM Studio](https://lmstudio.ai) or any OpenAI-compatible API server |
 | **Public endpoint** | HTTPS -- via Tailscale Funnel, Cloudflare Tunnel, ngrok, etc. |
 
