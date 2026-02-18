@@ -37,7 +37,7 @@ Audio to caller <---|---+                      |
 - **Barge-in** -- caller can interrupt the AI mid-sentence, audio clears instantly
 - **Call recording** -- saves mixed mono WAV of both parties, accurately aligned
 - **Push notifications** -- call summary + full transcript via ntfy
-- **Built-in web dashboard** -- live call feed with summaries, transcript view, and audio playback
+- **Call metadata** -- JSON logs of every call with transcript and summary
 - **Pre-recorded greetings** -- instant pickup, no TTS delay
 - **Silence handling** -- prompts quiet callers, auto-hangs-up after repeated silence
 - **Security** -- webhook signature validation, input truncation, XML escaping, prompt injection hardening
@@ -81,12 +81,6 @@ chmod +x setup.sh
 ./setup.sh               # auto-detects your GPU and installs everything
 cp .env.example .env     # then edit .env with your settings
 python main.py
-```
-
-Open the dashboard at:
-
-```
-http://127.0.0.1:8080/dashboard
 ```
 
 The setup script creates a virtual environment, installs CUDA PyTorch when an NVIDIA GPU is present (or CPU PyTorch otherwise), and handles all dependencies. On first run, models download automatically (~3 GB).
@@ -221,14 +215,11 @@ Make sure it's set to **POST** and the format is **XML**.
 
 </details>
 
-## Dashboard
+## Call data
 
-After startup, open `http://127.0.0.1:8080/dashboard` to view recent calls.
-
-- `GET /dashboard` (or `/`) serves the web UI
-- `GET /api/calls?limit=50` returns recent call metadata as JSON
-- Recordings are served at `/recordings/<file>.wav`
-- Call metadata is stored in `recordings/metadata/*.json`
+- Recordings are saved as WAV files in the `recordings/` directory
+- Call metadata (transcript, summary, caller info) is stored as JSON in the `metadata/` directory
+- `GET /health` returns `{"status": "ok"}` for uptime monitoring
 
 ## Voice cloning
 
@@ -318,7 +309,7 @@ All settings are configured via environment variables (`.env` file).
 | `SIGNALWIRE_PHONE_NUMBER` | *(required)* | Phone number for inbound calls |
 | `SIGNALWIRE_SIGNING_KEY` | *(uses token)* | Webhook signing key |
 | **Server** | | |
-| `HOST` | `0.0.0.0` | Bind address |
+| `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all interfaces) |
 | `PORT` | `8080` | Bind port |
 | `PUBLIC_HOST` | *(required)* | Public hostname for WebSocket URL |
 | `MAX_CONCURRENT_CALLS` | `3` | Max simultaneous calls |
@@ -344,7 +335,9 @@ All settings are configured via environment variables (`.env` file).
 | **Other** | | |
 | `OWNER_NAME` | *(none)* | Your name (used in greetings) |
 | `RECORDINGS_DIR` | `recordings` | Where call WAVs are saved |
+| `METADATA_DIR` | `metadata` | Where call metadata JSON is saved |
 | `NTFY_TOPIC` | *(none)* | ntfy.sh topic for notifications |
+| `NTFY_TOKEN` | *(none)* | Bearer token for authenticated ntfy topics |
 
 </details>
 

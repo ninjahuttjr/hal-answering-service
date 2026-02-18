@@ -19,6 +19,7 @@ env/
 
 # Runtime
 recordings/
+metadata/
 *.log
 
 # IDE
@@ -36,3 +37,7 @@ Thumbs.db
 .claude/
 tts_benchmark.py
 tts_samples/
+demo_call.py
+test_scripts/
+glm-4.7-flash-nothink.jinja
+nul

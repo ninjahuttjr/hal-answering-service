@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
 
 MAX_HISTORY_MESSAGES = 20  # 10 turns (user + assistant)
-MAX_SENTENCES_PER_RESPONSE = 4  # Phone calls: 1-2 normal, 4 is generous safety cap
+MAX_SENTENCES_PER_RESPONSE = 6  # Phone calls: 1-2 normal, 6 is generous safety cap
 
 # GLM-4 special tokens and other garbage that can leak from LLMs
 _GARBAGE_RE = re.compile(
@@ -25,6 +25,7 @@ _GARBAGE_RE = re.compile(
     r'|###[^\n]*'               # Leaked markdown headers
     r'|```[^\n]*'               # Code fences
     r'|~+</?[a-z]+'             # Malformed tags (e.g. ~</b)
+    r'|</?think>'               # GLM thinking tags that leak through
     , re.IGNORECASE
 )
 
@@ -82,8 +83,13 @@ class LLMClient:
         self.history.clear()
 
     def add_user_message(self, text: str):
-        """Append a user message to history."""
-        self.history.append({"role": "user", "content": text})
+        """Append a user message to history.
+
+        Prefixes with 'Caller:' to help smaller LLMs maintain clear
+        speaker identity (prevents the model from confusing itself
+        with the caller when the caller says things like 'I am Dave').
+        """
+        self.history.append({"role": "user", "content": f"Caller: {text}"})
         # Trim to max history
         if len(self.history) > MAX_HISTORY_MESSAGES:
             self.history = self.history[-MAX_HISTORY_MESSAGES:]
@@ -112,64 +118,83 @@ class LLMClient:
 
         log.info("LLM request: %d messages, last user: %s", len(messages), text[:80])
 
-        stream = self.client.chat.completions.create(
-            model=self.config.llm_model,
-            messages=messages,
-            max_tokens=self.config.llm_max_tokens,
-            temperature=self.config.llm_temperature,
-            stream=True,
-        )
+        try:
+            kwargs = dict(
+                model=self.config.llm_model,
+                messages=messages,
+                max_tokens=self.config.llm_max_tokens,
+                temperature=self.config.llm_temperature,
+                stream=True,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+            if self.config.llm_frequency_penalty:
+                kwargs["frequency_penalty"] = self.config.llm_frequency_penalty
+            stream = self.client.chat.completions.create(**kwargs)
+        except Exception as e:
+            log.error("LLM stream creation failed: %s", e)
+            return
 
         buffer = ""
         full_response = ""
         sentences_yielded = []
         garbage_count = 0
         degenerate = False
+        max_reached = False
 
-        for chunk in stream:
-            delta = chunk.choices[0].delta
-            if delta.content:
-                buffer += delta.content
-                full_response += delta.content
+        try:
+            for chunk in stream:
+                delta = chunk.choices[0].delta
+                # Fallback: if thinking mode is stuck on, use reasoning_content as content
+                has_reasoning = hasattr(delta, 'reasoning_content') and delta.reasoning_content
+                token = delta.content
+                if not token and has_reasoning:
+                    # LM Studio thinking mode is active — reasoning_content is all we get
+                    token = delta.reasoning_content
+                    log.debug("Using reasoning_content as fallback: %s", token[:80])
+                if token:
+                    buffer += token
+                    full_response += token
 
-                # Check for complete sentences in buffer
-                while True:
-                    match = SENTENCE_BOUNDARY.search(buffer)
-                    if match:
-                        raw = buffer[:match.start()].strip()
-                        buffer = buffer[match.end():]
-                        sentence = _sanitize(raw)
+                    # Check for complete sentences in buffer
+                    while True:
+                        match = SENTENCE_BOUNDARY.search(buffer)
+                        if match:
+                            raw = buffer[:match.start()].strip()
+                            buffer = buffer[match.end():]
+                            sentence = _sanitize(raw)
 
-                        if sentence and _has_real_words(sentence):
-                            # Check full response for degeneration (repetitive loops)
-                            if _is_degenerate(full_response):
-                                log.warning("LLM output degenerate, aborting stream")
-                                degenerate = True
-                                break
-                            sentences_yielded.append(sentence)
-                            yield (sentence, False)
+                            if sentence and _has_real_words(sentence):
+                                # Check full response for degeneration (repetitive loops)
+                                if _is_degenerate(full_response):
+                                    log.warning("LLM output degenerate, aborting stream")
+                                    degenerate = True
+                                    break
+                                sentences_yielded.append(sentence)
+                                yield (sentence, False)
 
-                            if len(sentences_yielded) >= MAX_SENTENCES_PER_RESPONSE:
-                                log.warning("Hit max sentences (%d), stopping",
-                                            MAX_SENTENCES_PER_RESPONSE)
-                                degenerate = True
-                                break
-                        elif raw:
-                            garbage_count += 1
-                            log.warning("Skipped garbage sentence: %s", raw[:80])
-                            if garbage_count >= 3:
-                                log.warning("Too many garbage sentences, aborting")
-                                degenerate = True
-                                break
-                    else:
+                                if len(sentences_yielded) >= MAX_SENTENCES_PER_RESPONSE:
+                                    log.info("Hit max sentences (%d), truncating cleanly",
+                                                MAX_SENTENCES_PER_RESPONSE)
+                                    max_reached = True
+                                    break
+                            elif raw:
+                                garbage_count += 1
+                                log.warning("Skipped garbage sentence: %s", raw[:80])
+                                if garbage_count >= 3:
+                                    log.warning("Too many garbage sentences, aborting")
+                                    degenerate = True
+                                    break
+                        else:
+                            break
+
+                    if degenerate or max_reached:
                         break
+        except Exception as e:
+            log.error("LLM stream iteration error: %s", e)
 
-                if degenerate:
-                    break
-
-        # Yield remaining buffer as final sentence
+        # Yield remaining buffer as final sentence (only if not truncated or degenerate)
         remaining = _sanitize(buffer)
-        if remaining and _has_real_words(remaining) and not degenerate:
+        if remaining and _has_real_words(remaining) and not degenerate and not max_reached:
             if remaining[-1] not in '.!?':
                 remaining += '.'
             sentences_yielded.append(remaining)
@@ -213,5 +238,14 @@ class LLMClient:
             messages=messages,
             max_tokens=300,
             temperature=0.3,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
-        return response.choices[0].message.content.strip()
+        result = response.choices[0].message
+        content = result.content or ""
+        # Fallback: if thinking mode consumed everything, use reasoning_content
+        if not content.strip() and hasattr(result, 'reasoning_content') and result.reasoning_content:
+            log.warning("Summary: content empty, falling back to reasoning_content")
+            content = result.reasoning_content
+            # Strip any <think> tags that leaked through
+            content = re.sub(r'</?think>', '', content)
+        return content.strip()

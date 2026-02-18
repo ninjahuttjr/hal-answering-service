@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import binascii
+import collections
 import json
 import logging
 import time
@@ -11,8 +12,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import HTMLResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response
 
 from config import Config
 from audio import SileroVAD
@@ -31,11 +31,16 @@ WS_START_TIMEOUT_S = 15
 # Max WebSocket frame size (SignalWire media frames are small — 20ms at 8kHz = ~160 bytes base64)
 WS_MAX_FRAME_SIZE = 65536
 
-# Relative folder under recordings_dir where call metadata JSON files are written
-CALL_METADATA_DIR = "metadata"
+# Max decoded audio payload size (bytes) — reject oversized base64 payloads before decode
+MAX_AUDIO_PAYLOAD_B64_LEN = 32000  # ~24KB decoded, well above normal 160-byte frames
 
-# Dashboard frontend HTML (served at / and /dashboard)
-DASHBOARD_HTML_PATH = Path(__file__).with_name("dashboard.html")
+# Upper bound on validated_call_sids dict to prevent memory exhaustion
+MAX_VALIDATED_SIDS = 100
+
+# Webhook rate limiting: max requests per IP within the sliding window
+WEBHOOK_RATE_LIMIT = 20           # max requests per window
+WEBHOOK_RATE_WINDOW_S = 60        # sliding window in seconds
+WEBHOOK_RATE_MAX_IPS = 500        # max tracked IPs (prevent memory exhaustion)
 
 
 def _validate_webhook(config: Config, request: Request, form: dict) -> bool:
@@ -53,7 +58,12 @@ def _validate_webhook(config: Config, request: Request, form: dict) -> bool:
         valid = validator.validate(public_url, form, signature)
         if not valid:
             # Also try with the raw request URL in case proxy forwards correctly
-            valid = validator.validate(str(request.url), form, signature)
+            raw_url = str(request.url)
+            valid = validator.validate(raw_url, form, signature)
+            if valid:
+                log.warning("Webhook signature valid only via raw request URL (%s), "
+                            "not public URL (%s). Check PUBLIC_HOST / proxy config.",
+                            raw_url, public_url)
         return valid
     except ImportError:
         log.error("signalwire.request_validator not available — REJECTING all webhooks. "
@@ -83,15 +93,12 @@ def _persist_call_metadata(
     transcript: list[dict] | None = None,
     recording_path: str = "",
 ):
-    """Persist call details for the dashboard/API."""
+    """Persist call metadata as JSON alongside recordings."""
     try:
-        recordings_dir = Path(config.recordings_dir)
-        meta_dir = recordings_dir / CALL_METADATA_DIR
+        meta_dir = Path(config.metadata_dir)
         meta_dir.mkdir(parents=True, exist_ok=True)
 
         rec_name = Path(recording_path).name if recording_path else ""
-        rec_full_path = recordings_dir / rec_name if rec_name else None
-        has_recording = bool(rec_name and rec_full_path and rec_full_path.exists())
 
         now = datetime.now(timezone.utc)
         payload = {
@@ -102,8 +109,7 @@ def _persist_call_metadata(
             "duration_human": _duration_human(duration),
             "summary": (summary or "").strip(),
             "transcript": transcript or [],
-            "recording_file": rec_name if has_recording else "",
-            "recording_url": f"/recordings/{rec_name}" if has_recording else "",
+            "recording_file": rec_name,
         }
 
         fname = f"{now.strftime('%Y%m%d_%H%M%S')}_{_safe_token(call_sid[:12])}.json"
@@ -113,24 +119,6 @@ def _persist_call_metadata(
         log.error("Failed to persist call metadata: %s", e)
 
 
-def _load_recent_calls(config: Config, limit: int = 50) -> list[dict]:
-    """Load recent call metadata for the dashboard API."""
-    meta_dir = Path(config.recordings_dir) / CALL_METADATA_DIR
-    if not meta_dir.exists():
-        return []
-
-    out: list[dict] = []
-    paths = sorted(meta_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    for path in paths[:max(1, min(limit, 200))]:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            out.append(data)
-    return out
-
-
 def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
                greeting_cache: dict | None = None,
                silence_prompt_cache: list | None = None) -> FastAPI:
@@ -138,54 +126,74 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
     app = FastAPI(title="HAL Answering Service", docs_url=None, redoc_url=None, openapi_url=None)
     recordings_dir = Path(config.recordings_dir)
     recordings_dir.mkdir(parents=True, exist_ok=True)
-    (recordings_dir / CALL_METADATA_DIR).mkdir(parents=True, exist_ok=True)
-    app.mount("/recordings", StaticFiles(directory=str(recordings_dir)), name="recordings")
 
     # Track active calls and validated call SIDs with timestamp for TTL
     active_calls: dict[str, CallHandler] = {}
     validated_call_sids: dict[str, float] = {}  # {call_sid: timestamp}
 
+    # Webhook rate limiting: per-IP sliding window of request timestamps
+    _webhook_hits: dict[str, collections.deque] = {}
+
     def _prune_stale_callsids():
-        """Remove validated CallSids older than TTL."""
+        """Remove validated CallSids older than TTL and enforce upper bound."""
         now = time.monotonic()
         stale = [sid for sid, ts in validated_call_sids.items()
                  if now - ts > CALLSID_TTL_S]
         for sid in stale:
             validated_call_sids.pop(sid, None)
             log.debug("Pruned stale CallSid: %s", sid[:12])
+        # Enforce upper bound to prevent memory exhaustion from rapid webhook spam
+        if len(validated_call_sids) > MAX_VALIDATED_SIDS:
+            sorted_sids = sorted(validated_call_sids.items(), key=lambda x: x[1])
+            excess = len(validated_call_sids) - MAX_VALIDATED_SIDS
+            for sid, _ in sorted_sids[:excess]:
+                validated_call_sids.pop(sid, None)
+            log.warning("Pruned %d excess validated CallSids (limit: %d)", excess, MAX_VALIDATED_SIDS)
+
+    def _check_rate_limit(client_ip: str) -> bool:
+        """Return True if the request is within rate limits, False to reject."""
+        now = time.monotonic()
+
+        # Prune tracked IPs if over capacity (evict oldest)
+        if client_ip not in _webhook_hits and len(_webhook_hits) >= WEBHOOK_RATE_MAX_IPS:
+            oldest_ip = min(_webhook_hits, key=lambda ip: _webhook_hits[ip][-1] if _webhook_hits[ip] else 0)
+            _webhook_hits.pop(oldest_ip, None)
+
+        if client_ip not in _webhook_hits:
+            _webhook_hits[client_ip] = collections.deque()
+
+        hits = _webhook_hits[client_ip]
+
+        # Slide the window: remove timestamps older than the window
+        while hits and now - hits[0] > WEBHOOK_RATE_WINDOW_S:
+            hits.popleft()
+
+        if len(hits) >= WEBHOOK_RATE_LIMIT:
+            return False
+
+        hits.append(now)
+        return True
 
     @app.get("/health")
     async def health():
         return {"status": "ok"}
 
-    @app.get("/", response_class=HTMLResponse)
-    @app.get("/dashboard", response_class=HTMLResponse)
-    async def dashboard():
-        """Simple web dashboard for recent calls."""
-        try:
-            return HTMLResponse(DASHBOARD_HTML_PATH.read_text(encoding="utf-8"))
-        except Exception as e:
-            return HTMLResponse(
-                f"<h1>Dashboard unavailable</h1><p>{xml_escape(str(e))}</p>",
-                status_code=500,
-            )
-
-    @app.get("/api/calls")
-    async def api_calls(limit: int = 50):
-        """Recent call metadata for the dashboard frontend."""
-        return {"calls": _load_recent_calls(config, limit=limit)}
-
     @app.post("/incoming-call")
     async def incoming_call(request: Request):
         """SignalWire webhook for incoming calls."""
+        # Rate limit by client IP
+        client_ip = request.client.host if request.client else "unknown"
+        if not _check_rate_limit(client_ip):
+            log.warning("RATE LIMITED webhook from %s", client_ip)
+            return Response(content="Too Many Requests", status_code=429)
+
         form = dict(await request.form())
         call_sid = form.get("CallSid", "")
         caller = form.get("From", "unknown")
 
         # Validate webhook signature
         if not _validate_webhook(config, request, form):
-            log.warning("REJECTED invalid webhook signature from %s",
-                        request.client.host if request.client else "unknown")
+            log.warning("REJECTED invalid webhook signature from %s", client_ip)
             return Response(content="Forbidden", status_code=403)
 
         # Prune stale CallSids on each webhook
@@ -237,6 +245,7 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
         call_start_time: float = 0.0
         duration_task: asyncio.Task | None = None
         started = False  # Track whether we got a valid "start" event
+        _finalized = False  # Reentrance guard for _finalize_call
 
         async def send_audio(mulaw_bytes: bytes):
             """Send mu-law audio back to SignalWire."""
@@ -253,19 +262,28 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
                     "streamSid": stream_sid,
                     "media": {"payload": payload},
                 }
-                await ws.send_json(msg)
+                try:
+                    await ws.send_json(msg)
+                except Exception:
+                    return  # WebSocket closed, stop sending
                 await asyncio.sleep(0)
 
         async def send_clear():
             """Send clear event to flush outbound audio on barge-in."""
             if stream_sid is None:
                 return
-            await ws.send_json({"event": "clear", "streamSid": stream_sid})
+            try:
+                await ws.send_json({"event": "clear", "streamSid": stream_sid})
+            except Exception:
+                return  # WebSocket closed
             log.debug("Sent clear event")
 
         async def _enforce_max_duration():
             """Kill the call if it exceeds max duration."""
-            await asyncio.sleep(config.max_call_duration_s)
+            try:
+                await asyncio.sleep(config.max_call_duration_s)
+            except asyncio.CancelledError:
+                return
             log.warning("Call exceeded max duration (%ds), closing", config.max_call_duration_s)
             try:
                 await ws.close(code=1000, reason="Max call duration exceeded")
@@ -274,7 +292,10 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
 
         async def _enforce_start_timeout():
             """Close connection if no valid 'start' event arrives in time."""
-            await asyncio.sleep(WS_START_TIMEOUT_S)
+            try:
+                await asyncio.sleep(WS_START_TIMEOUT_S)
+            except asyncio.CancelledError:
+                return
             if not started:
                 log.warning("WebSocket timed out waiting for start event, closing")
                 try:
@@ -287,26 +308,38 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
 
         async def _finalize_call():
             """Run call teardown once: summary, persistence, notification, cleanup."""
-            nonlocal handler
-            if not handler:
+            nonlocal handler, _finalized
+            if _finalized or not handler:
                 return
+            _finalized = True
+
+            h = handler
+            handler = None  # Prevent concurrent access
 
             duration = max(0.0, time.perf_counter() - call_start_time) if call_start_time else 0.0
-            transcript = list(handler.transcript)
-            summary = await handler.on_stop()
-            _log_call_end(handler.caller_number, handler.call_sid, duration, summary)
+            transcript = list(h.transcript)
+            summary = await h.on_stop()
+            _log_call_end(h.caller_number, h.call_sid, duration, summary)
             _persist_call_metadata(
                 config=config,
-                caller_number=handler.caller_number,
-                call_sid=handler.call_sid,
+                caller_number=h.caller_number,
+                call_sid=h.call_sid,
                 duration=duration,
                 summary=summary,
                 transcript=transcript,
-                recording_path=handler.last_recording_path,
+                recording_path=h.last_recording_path,
             )
-            await _notify(config, handler.caller_number, summary, duration, transcript)
-            active_calls.pop(handler.call_sid, None)
-            handler = None
+            await _notify(config, h.caller_number, summary, duration, transcript)
+            active_calls.pop(h.call_sid, None)
+
+        async def _cancel_task(task: asyncio.Task | None):
+            """Cancel an async task and await its completion."""
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         try:
             while True:
@@ -352,8 +385,7 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
                     started = True
 
                     # Cancel the start timeout
-                    if not start_timeout_task.done():
-                        start_timeout_task.cancel()
+                    await _cancel_task(start_timeout_task)
 
                     log.info("━━━ Call started  caller=%s  id=%s ━━━", caller_number, call_sid[:12])
                     call_start_time = time.perf_counter()
@@ -385,14 +417,20 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
                 elif event == "media" and handler:
                     payload = data.get("media", {}).get("payload", "")
                     if payload:
+                        # Reject oversized base64 payloads before decoding
+                        if len(payload) > MAX_AUDIO_PAYLOAD_B64_LEN:
+                            log.warning("Dropping oversized audio payload (%d bytes b64)", len(payload))
+                            continue
                         try:
                             mulaw_bytes = base64.b64decode(payload, validate=True)
                         except binascii.Error:
                             continue  # Silently drop malformed frames
                         await handler.on_audio(mulaw_bytes)
 
+                    # Capture local ref to avoid null-reference race with _finalize_call
+                    h = handler
                     # Agent requested hangup (LLM emitted [HANGUP])
-                    if handler.hangup_requested:
+                    if h and h.hangup_requested:
                         log.debug("Agent requested call hangup")
                         await _finalize_call()
                         try:
@@ -413,10 +451,8 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
             log.error("WebSocket error: %s", type(e).__name__)
             await _finalize_call()
         finally:
-            if duration_task and not duration_task.done():
-                duration_task.cancel()
-            if not start_timeout_task.done():
-                start_timeout_task.cancel()
+            await _cancel_task(duration_task)
+            await _cancel_task(start_timeout_task)
 
     return app
 
@@ -447,15 +483,20 @@ async def _notify(config: Config, caller_number: str, summary: str,
 
     try:
         import httpx
+        headers = {
+            "Title": f"Call from {caller_number} ({duration_str})",
+            "Priority": "high",
+            "Tags": "phone",
+        }
+        # Add bearer token auth if configured
+        if config.ntfy_token:
+            headers["Authorization"] = f"Bearer {config.ntfy_token}"
+
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"https://ntfy.sh/{config.ntfy_topic}",
                 content=body.encode("utf-8"),
-                headers={
-                    "Title": f"Call from {caller_number} ({duration_str})",
-                    "Priority": "high",
-                    "Tags": "phone",
-                },
+                headers=headers,
                 timeout=10,
             )
             log.debug("ntfy sent: %s", resp.status_code)

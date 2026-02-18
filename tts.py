@@ -2,6 +2,7 @@
 
 import audioop
 import logging
+import os
 import time
 import numpy as np
 import torch
@@ -110,6 +111,9 @@ def _pcm_to_mulaw(audio_float: np.ndarray) -> bytes:
     return audioop.lin2ulaw(pcm16.tobytes(), 2)
 
 
+MAX_TTS_TEXT_LENGTH = 2000  # Characters — prevent OOM on extremely long text
+
+
 class TTS:
     """
     Chatterbox Turbo TTS wrapper for HAL Answering Service.
@@ -129,8 +133,14 @@ class TTS:
                           If None, uses the built-in default voice.
             device: torch device ("cuda" or "cpu").
         """
+        import threading
         self.device = device
         self._voice_prompt = voice_prompt
+        self._lock = threading.Lock()  # Protect model state from concurrent calls
+
+        # Validate voice prompt file exists before loading model
+        if voice_prompt and not os.path.isfile(voice_prompt):
+            raise FileNotFoundError(f"TTS voice prompt file not found: {voice_prompt}")
 
         log.info("Loading Chatterbox Turbo model on %s...", device)
         t0 = time.perf_counter()
@@ -155,7 +165,14 @@ class TTS:
         if not text.strip():
             return b""
 
-        wav_tensor = self._model.generate(text)
+        # Cap text length to prevent OOM
+        if len(text) > MAX_TTS_TEXT_LENGTH:
+            log.warning("TTS text truncated from %d to %d chars", len(text), MAX_TTS_TEXT_LENGTH)
+            text = text[:MAX_TTS_TEXT_LENGTH]
+
+        with self._lock:
+            wav_tensor = self._model.generate(text)
+
         audio_24k = _to_numpy(wav_tensor.squeeze())
 
         if len(audio_24k) == 0:

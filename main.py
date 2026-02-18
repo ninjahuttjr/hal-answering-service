@@ -243,20 +243,29 @@ def main():
     owner = config.owner_name
     for period in ("morning", "afternoon", "evening"):
         text = get_greeting(owner, time_of_day=period)
-        mulaw = b"".join(c["mulaw"] for c in tts.synthesize_mulaw_streaming(text))
-        greeting_cache[period] = {"text": text, "mulaw": mulaw}
-        log.info("Pre-recorded greeting (%s): %.1fs", period, len(mulaw) / 8000)
-    log.info("Greetings pre-recorded in %.1fs", time.perf_counter() - t0)
+        try:
+            mulaw = b"".join(c["mulaw"] for c in tts.synthesize_mulaw_streaming(text))
+            greeting_cache[period] = {"text": text, "mulaw": mulaw}
+            log.info("Pre-recorded greeting (%s): %.1fs", period, len(mulaw) / 8000)
+        except Exception as e:
+            log.warning("Failed to pre-record greeting (%s): %s — will use live TTS", period, e)
+    log.info("Greetings pre-recorded in %.1fs (%d/%d cached)",
+             time.perf_counter() - t0, len(greeting_cache), 3)
 
     # Pre-record silence prompts
     t0 = time.perf_counter()
     silence_prompt_cache = []
     for prompt_text in SILENCE_PROMPTS:
-        mulaw = b"".join(c["mulaw"] for c in tts.synthesize_mulaw_streaming(prompt_text))
-        silence_prompt_cache.append({"text": prompt_text, "mulaw": mulaw})
-    log.info("Silence prompts pre-recorded in %.1fs", time.perf_counter() - t0)
+        try:
+            mulaw = b"".join(c["mulaw"] for c in tts.synthesize_mulaw_streaming(prompt_text))
+            silence_prompt_cache.append({"text": prompt_text, "mulaw": mulaw})
+        except Exception as e:
+            log.warning("Failed to pre-record silence prompt: %s", e)
+    log.info("Silence prompts pre-recorded in %.1fs (%d/%d cached)",
+             time.perf_counter() - t0, len(silence_prompt_cache), len(SILENCE_PROMPTS))
 
     os.makedirs(config.recordings_dir, exist_ok=True)
+    os.makedirs(config.metadata_dir, exist_ok=True)
 
     app = create_app(config, stt, tts, vad_model, greeting_cache, silence_prompt_cache)
 

@@ -6,6 +6,7 @@ import collections
 import logging
 import os
 import re
+import threading
 import time
 import wave
 from datetime import datetime
@@ -34,7 +35,8 @@ HANGUP_TAG = "[HANGUP]"
 # --- Barge-in detection constants ---
 BARGE_IN_RMS_DELTA = 0.03       # Must exceed ambient noise floor by this much
 BARGE_IN_RMS_FLOOR = 0.01       # Absolute minimum threshold (even in dead silence)
-BARGE_IN_FRAMES_REQUIRED = 6    # 6 × 20ms = 120ms (eliminates noise blips)
+BARGE_IN_FRAMES_REQUIRED = 6    # 6 × 20ms = 120ms window size for sliding window
+BARGE_IN_FRAMES_THRESHOLD = 4   # 4 of 6 frames above threshold triggers barge-in
 BARGE_IN_DELAY_S = 0.5          # Skip first 0.5s of bot speech (echo window)
 RMS_EMA_ALPHA = 0.02            # Smoothing factor for noise floor tracking (post-calibration)
 RMS_EMA_ALPHA_FAST = 0.1        # Fast alpha during initial calibration
@@ -84,13 +86,17 @@ class CallHandler:
         self._pipeline_task: asyncio.Task | None = None
 
         # Barge-in detection state
-        self._barge_in_count = 0
+        self._barge_in_window: collections.deque = collections.deque(maxlen=BARGE_IN_FRAMES_REQUIRED)
         self._barge_in_audio_buffer: collections.deque = collections.deque(maxlen=25)  # ~500ms
         self._bot_speak_start_time: float = 0.0
         self._sentences_spoken: list[str] = []
         self._history_finalized = False
         self._rms_ema: float = 0.0  # Adaptive ambient noise floor
         self._ema_calibrated: bool = False  # True after enough frames to trust EMA
+
+        # Lock protecting shared mutable state accessed from multiple async contexts
+        # (_sentences_spoken, _rec_outbound, _history_finalized)
+        self._state_lock = asyncio.Lock()
 
         # Recording state — wall-clock time for accurate alignment
         self._rec_inbound: list[bytes] = []  # Raw mu-law from caller (continuous, in order)
@@ -222,17 +228,16 @@ class CallHandler:
                 if elapsed < BARGE_IN_DELAY_S:
                     return
 
-            # Adaptive barge-in threshold
+            # Adaptive barge-in threshold — sliding window (N of M frames)
             barge_threshold = max(BARGE_IN_RMS_FLOOR, self._rms_ema + BARGE_IN_RMS_DELTA)
+            self._barge_in_window.append(1 if rms > barge_threshold else 0)
 
-            if rms > barge_threshold:
-                self._barge_in_count += 1
-                if self._barge_in_count >= BARGE_IN_FRAMES_REQUIRED:
-                    log.info("[%s] Barge-in detected! RMS=%.4f threshold=%.4f count=%d",
-                             self.call_sid, rms, barge_threshold, self._barge_in_count)
-                    await self._handle_barge_in()
-            else:
-                self._barge_in_count = 0
+            if (len(self._barge_in_window) >= BARGE_IN_FRAMES_REQUIRED
+                    and sum(self._barge_in_window) >= BARGE_IN_FRAMES_THRESHOLD):
+                log.info("[%s] Barge-in detected! RMS=%.4f threshold=%.4f hits=%d/%d",
+                         self.call_sid, rms, barge_threshold,
+                         sum(self._barge_in_window), len(self._barge_in_window))
+                await self._handle_barge_in()
             return
 
         # === STATE 2: ECHO COOLDOWN — bot audio still playing from buffer ===
@@ -249,14 +254,13 @@ class CallHandler:
             # quickly, but SignalWire is still playing them back.
             self._barge_in_audio_buffer.append(pcm)
             barge_threshold = max(BARGE_IN_RMS_FLOOR, self._rms_ema + BARGE_IN_RMS_DELTA)
-            if rms > barge_threshold:
-                self._barge_in_count += 1
-                if self._barge_in_count >= BARGE_IN_FRAMES_REQUIRED:
-                    log.info("[%s] Barge-in during cooldown! RMS=%.4f threshold=%.4f",
-                             self.call_sid, rms, barge_threshold)
-                    await self._handle_barge_in()
-            else:
-                self._barge_in_count = 0
+            self._barge_in_window.append(1 if rms > barge_threshold else 0)
+
+            if (len(self._barge_in_window) >= BARGE_IN_FRAMES_REQUIRED
+                    and sum(self._barge_in_window) >= BARGE_IN_FRAMES_THRESHOLD):
+                log.info("[%s] Barge-in during cooldown! RMS=%.4f threshold=%.4f",
+                         self.call_sid, rms, barge_threshold)
+                await self._handle_barge_in()
             return
 
         # === STATE 3: NORMAL LISTENING ===
@@ -296,11 +300,16 @@ class CallHandler:
 
         # STT
         t0 = time.perf_counter()
-        text = await asyncio.to_thread(self.stt.transcribe, audio_8k, SAMPLE_RATE_8K)
+        try:
+            text = await asyncio.to_thread(self.stt.transcribe, audio_8k, SAMPLE_RATE_8K)
+        except Exception as e:
+            log.error("[%s] STT transcription failed: %s", self.call_sid, e)
+            return
         stt_ms = (time.perf_counter() - t0) * 1000
         log.info('[%s] Caller: "%s"  (%.0fms)', self.call_sid, text, stt_ms)
 
         if not text.strip():
+            log.debug("[%s] STT returned empty text for %.2fs audio, skipping", self.call_sid, duration_s)
             return
 
         # Cap transcribed text length to limit prompt injection surface
@@ -313,16 +322,20 @@ class CallHandler:
         # Add user message to LLM history (caller is responsible now)
         self.llm.add_user_message(text)
 
-        # Reset sentence tracking for this pipeline run
-        self._sentences_spoken = []
-        self._history_finalized = False
+        # Reset sentence tracking for this pipeline run (under lock)
+        async with self._state_lock:
+            self._sentences_spoken = []
+            self._history_finalized = False
 
         # LLM -> TTS with true pipelining
         self.speaking = True
         self._bot_speak_start_time = time.perf_counter()
-        self._barge_in_count = 0
+        self._barge_in_window.clear()
         self._barge_in_audio_buffer.clear()
         self._llm_cancel.clear()
+
+        # Shared stop event for the LLM thread (checked before each queue put)
+        llm_stop = threading.Event()
 
         t1 = time.perf_counter()
         first_sentence = True
@@ -336,17 +349,24 @@ class CallHandler:
             """Runs in thread — pushes sentences to queue as they arrive."""
             try:
                 for sentence, is_final in self.llm.chat_stream_sentences(text):
-                    if self._llm_cancel.is_set():
+                    if self._llm_cancel.is_set() or llm_stop.is_set():
                         break
-                    asyncio.run_coroutine_threadsafe(
-                        sentence_queue.put((sentence, is_final)), loop
-                    ).result(timeout=5)
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            sentence_queue.put((sentence, is_final)), loop
+                        ).result(timeout=5)
+                    except Exception:
+                        break  # Loop/queue gone, exit cleanly
             except Exception as e:
                 log.error("[%s] LLM error: %s", self.call_sid, e)
             finally:
-                asyncio.run_coroutine_threadsafe(
-                    sentence_queue.put(None), loop
-                ).result(timeout=5)
+                if not llm_stop.is_set():
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            sentence_queue.put(None), loop
+                        ).result(timeout=5)
+                    except Exception:
+                        pass  # Loop/queue gone
 
         llm_thread_future = loop.run_in_executor(None, _llm_thread)
 
@@ -393,7 +413,8 @@ class CallHandler:
                     if self._llm_cancel.is_set():
                         break
 
-                    self._sentences_spoken.append(sentence)
+                    async with self._state_lock:
+                        self._sentences_spoken.append(sentence)
                     self.transcript.append({"role": "agent", "text": sentence})
 
                 if hangup_after:
@@ -402,14 +423,16 @@ class CallHandler:
 
         finally:
             self._llm_cancel.set()  # Ensure thread exits
+            llm_stop.set()  # Signal thread to stop before queue puts
             try:
-                await asyncio.wait_for(llm_thread_future, timeout=2)
+                await asyncio.wait_for(llm_thread_future, timeout=3)
             except (asyncio.TimeoutError, Exception):
-                pass
+                log.warning("[%s] LLM thread did not exit cleanly", self.call_sid)
 
             # Finalize history (unless barge-in already did it)
-            if not self._history_finalized:
-                self._finalize_history()
+            async with self._state_lock:
+                if not self._history_finalized:
+                    self._finalize_history()
 
         self.speaking = False
         self._bot_speak_start_time = 0.0
@@ -426,13 +449,19 @@ class CallHandler:
             self._reset_silence_timer()
 
     def _finalize_history(self):
-        """Store spoken sentences in LLM history as the assistant message."""
+        """Store spoken sentences in LLM history as the assistant message.
+
+        MUST be called while holding self._state_lock.
+        """
         if self._history_finalized:
             return
         self._history_finalized = True
 
-        if self._sentences_spoken:
-            clean_response = ' '.join(self._sentences_spoken)
+        # Snapshot under lock
+        spoken = list(self._sentences_spoken)
+
+        if spoken:
+            clean_response = ' '.join(spoken)
             self.llm.history.append({"role": "assistant", "content": clean_response})
             log.debug("[%s] History finalized: %s", self.call_sid, clean_response[:100])
         else:
@@ -441,7 +470,10 @@ class CallHandler:
             log.warning("[%s] No sentences spoken, added fallback to history", self.call_sid)
 
     def _finalize_interrupted_history(self):
-        """Store spoken sentences + [interrupted] marker after barge-in."""
+        """Store spoken sentences + [interrupted] marker after barge-in.
+
+        MUST be called while holding self._state_lock.
+        """
         if self._history_finalized:
             return
         self._history_finalized = True
@@ -452,8 +484,11 @@ class CallHandler:
             log.debug("[%s] Barge-in with no pending user message, skipping history", self.call_sid)
             return
 
-        if self._sentences_spoken:
-            clean_response = ' '.join(self._sentences_spoken) + " [interrupted]"
+        # Snapshot under lock
+        spoken = list(self._sentences_spoken)
+
+        if spoken:
+            clean_response = ' '.join(spoken) + " [interrupted]"
             self.llm.history.append({"role": "assistant", "content": clean_response})
             log.debug("[%s] Interrupted history finalized: %s", self.call_sid, clean_response[:100])
         else:
@@ -470,8 +505,9 @@ class CallHandler:
         # 1. Signal pipeline to stop
         self._llm_cancel.set()
 
-        # 2. Store spoken sentences + [interrupted] in LLM history
-        self._finalize_interrupted_history()
+        # 2. Store spoken sentences + [interrupted] in LLM history (under lock)
+        async with self._state_lock:
+            self._finalize_interrupted_history()
 
         # 3. Flush SignalWire's queued outbound audio
         if self._send_clear:
@@ -479,17 +515,18 @@ class CallHandler:
 
         # 4. Trim outbound recording — remove audio that was flushed (never heard)
         barge_sample = int((time.perf_counter() - self._rec_wall_start) * SAMPLE_RATE_8K)
-        trimmed = []
-        for offset, data in self._rec_outbound:
-            end = offset + len(data)
-            if offset >= barge_sample:
-                continue  # Queued but never played — discard entirely
-            if end > barge_sample:
-                # Partially played — keep only what was heard
-                trimmed.append((offset, data[:barge_sample - offset]))
-            else:
-                trimmed.append((offset, data))
-        self._rec_outbound = trimmed
+        async with self._state_lock:
+            trimmed = []
+            for offset, data in self._rec_outbound:
+                end = offset + len(data)
+                if offset >= barge_sample:
+                    continue  # Queued but never played — discard entirely
+                if end > barge_sample:
+                    # Partially played — keep only what was heard
+                    trimmed.append((offset, data[:barge_sample - offset]))
+                else:
+                    trimmed.append((offset, data))
+            self._rec_outbound = trimmed
 
         # 5. Reset playback model
         self._playback_end_time = 0.0
@@ -497,7 +534,7 @@ class CallHandler:
         # 6. Transition to listening
         self.speaking = False
         self._bot_speak_start_time = 0.0
-        self._barge_in_count = 0
+        self._barge_in_window.clear()
 
         # 7. Wait for pipeline task to finish FIRST — its finally block calls
         #    vad.reset(), so we must let it run before we seed the VAD.
@@ -509,10 +546,15 @@ class CallHandler:
                             self.call_sid)
 
         # 8. NOW seed VAD with barge-in speech (after pipeline's finally has run)
-        self.vad.reset()
-        for buffered_pcm in self._barge_in_audio_buffer:
-            self.vad.feed(buffered_pcm)
-        self._barge_in_audio_buffer.clear()
+        try:
+            self.vad.reset()
+            for buffered_pcm in self._barge_in_audio_buffer:
+                self.vad.feed(buffered_pcm)
+        except Exception as e:
+            log.error("[%s] VAD seeding failed after barge-in: %s", self.call_sid, e)
+            self.vad.reset()
+        finally:
+            self._barge_in_audio_buffer.clear()
 
         # 9. Allow new pipelines
         self._processing = False
@@ -537,12 +579,13 @@ class CallHandler:
 
         # Don't interrupt if bot is speaking, processing, or caller is mid-speech
         if self.speaking or self._processing or self.vad.speaking:
-            # Retry — restart the timer
-            self._silence_timer = asyncio.create_task(self._silence_timeout_loop())
+            # Retry — restart the timer (properly cancel old task first)
+            self._reset_silence_timer()
             return
 
         if not self._silence_prompt_cache:
-            log.warning("[%s] No silence prompts cached, skipping", self.call_sid)
+            log.warning("[%s] No silence prompts cached, restarting timer anyway", self.call_sid)
+            self._reset_silence_timer()
             return
 
         self._silence_prompt_count += 1
@@ -571,9 +614,10 @@ class CallHandler:
             audio_duration = len(mulaw_bytes) / SAMPLE_RATE_8K
             self._playback_end_time = now + audio_duration
 
-            # Record outbound audio
+            # Record outbound audio (under lock)
             rec_offset = int((now - self._rec_wall_start) * SAMPLE_RATE_8K)
-            self._rec_outbound.append((rec_offset, mulaw_bytes))
+            async with self._state_lock:
+                self._rec_outbound.append((rec_offset, mulaw_bytes))
 
             try:
                 await self._send_audio(mulaw_bytes)
@@ -604,10 +648,14 @@ class CallHandler:
 
         def _generate():
             chunks = []
-            for chunk in self.tts.synthesize_mulaw_streaming(text):
-                if self._llm_cancel.is_set():
-                    return b""
-                chunks.append(chunk["mulaw"])
+            try:
+                for chunk in self.tts.synthesize_mulaw_streaming(text):
+                    if self._llm_cancel.is_set():
+                        return b""
+                    chunks.append(chunk["mulaw"])
+            except Exception as e:
+                log.error("[%s] TTS synthesis failed: %s", self.call_sid, e)
+                return b""
             return b"".join(chunks)
 
         mulaw_bytes = await asyncio.to_thread(_generate)
@@ -623,9 +671,14 @@ class CallHandler:
 
             # Record outbound audio at estimated PLAYBACK position (not send time)
             rec_offset = int((playback_start - self._rec_wall_start) * SAMPLE_RATE_8K)
-            self._rec_outbound.append((rec_offset, mulaw_bytes))
+            async with self._state_lock:
+                self._rec_outbound.append((rec_offset, mulaw_bytes))
 
-            await self._send_audio(mulaw_bytes)
+            try:
+                await self._send_audio(mulaw_bytes)
+            except Exception:
+                log.debug("[%s] TTS send failed (WebSocket closed)", self.call_sid)
+                return
             log.debug("[%s] TTS (%.0fms, %d bytes, %.1fs audio): %s",
                       self.call_sid, tts_ms, len(mulaw_bytes),
                       audio_duration, text[:60])
@@ -672,7 +725,7 @@ class CallHandler:
             # Save mono WAV
             rec_dir = self.config.recordings_dir
             os.makedirs(rec_dir, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")  # Microsecond precision
             # Strip everything except alphanumeric chars to prevent path traversal
             safe_number = re.sub(r'[^a-zA-Z0-9]', '', self.caller_number)
             safe_sid = re.sub(r'[^a-zA-Z0-9]', '', self.call_sid[:8])

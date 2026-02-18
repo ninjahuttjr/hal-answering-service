@@ -1,6 +1,7 @@
 """Speech-to-text for telephony audio using Faster-Whisper."""
 
 import logging
+import threading
 import numpy as np
 from faster_whisper import WhisperModel
 
@@ -20,6 +21,7 @@ class SpeechToText:
         self.device = device
         self.compute_type = compute_type
         self.model: WhisperModel | None = None
+        self._lock = threading.Lock()  # Protect model state from concurrent calls
 
     def load(self):
         """Initialize the Whisper model."""
@@ -39,6 +41,9 @@ class SpeechToText:
         if self.model is None:
             raise RuntimeError("STT model not loaded. Call load() first.")
 
+        if input_sr <= 0:
+            raise ValueError(f"input_sr must be positive, got {input_sr}")
+
         if len(audio) == 0:
             return ""
 
@@ -57,23 +62,28 @@ class SpeechToText:
                 np.zeros(pad_size, dtype=np.float32),
             ])
 
-        segments, info = self.model.transcribe(
-            audio,
-            beam_size=1,                    # Greedy decode — fastest
-            best_of=1,                      # No sampling alternatives
-            vad_filter=False,               # OFF — Silero VAD already isolated speech
-            no_speech_threshold=0.6,        # Skip segments with high no-speech probability
-            log_prob_threshold=-1.0,        # Relaxed — don't drop valid short utterances
-            condition_on_previous_text=False,  # Faster, no cascading errors
-            language="en",                  # Skip language detection
-            initial_prompt="Phone call screening conversation.",  # Prime decoder for telephony context
-        )
+        with self._lock:
+            segments, info = self.model.transcribe(
+                audio,
+                beam_size=1,                    # Greedy decode — fastest
+                best_of=1,                      # No sampling alternatives
+                vad_filter=False,               # OFF — Silero VAD already isolated speech
+                no_speech_threshold=0.6,        # Skip segments with high no-speech probability
+                log_prob_threshold=-1.0,        # Relaxed — don't drop valid short utterances
+                condition_on_previous_text=False,  # Faster, no cascading errors
+                language="en",                  # Skip language detection
+                initial_prompt="Phone call screening conversation.",  # Prime decoder for telephony context
+            )
 
-        text_parts = []
-        for segment in segments:
-            text_parts.append(segment.text.strip())
+            text_parts = []
+            for segment in segments:
+                text_parts.append(segment.text.strip())
 
         result = " ".join(text_parts).strip()
         if result:
-            log.info("STT: %s (prob=%.2f)", result, info.language_probability)
+            lang_prob = getattr(info, 'language_probability', None)
+            if lang_prob is not None:
+                log.info("STT: %s (prob=%.2f)", result, lang_prob)
+            else:
+                log.info("STT: %s", result)
         return result
