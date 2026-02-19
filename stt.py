@@ -16,17 +16,38 @@ class SpeechToText:
     """Faster-Whisper STT wrapper optimized for telephony speed."""
 
     def __init__(self, model_size: str = "medium.en", device: str = "cuda",
-                 compute_type: str = "float16"):
+                 compute_type: str = "float16",
+                 language: str = "en",
+                 beam_size: int = 1,
+                 best_of: int = 1,
+                 no_speech_threshold: float = 0.6,
+                 log_prob_threshold: float = -1.0,
+                 condition_on_previous_text: bool = False,
+                 initial_prompt: str = "Phone call screening conversation."):
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
+        self.language = language
+        self.beam_size = beam_size
+        self.best_of = best_of
+        self.no_speech_threshold = no_speech_threshold
+        self.log_prob_threshold = log_prob_threshold
+        self.condition_on_previous_text = condition_on_previous_text
+        self.initial_prompt = initial_prompt
         self.model: WhisperModel | None = None
         self._lock = threading.Lock()  # Protect model state from concurrent calls
 
     def load(self):
         """Initialize the Whisper model."""
-        log.info("Loading Faster-Whisper model: %s on %s (%s)",
-                 self.model_size, self.device, self.compute_type)
+        log.info(
+            "Loading Faster-Whisper model: %s on %s (%s) lang=%s beam=%d best_of=%d",
+            self.model_size,
+            self.device,
+            self.compute_type,
+            self.language.strip() or "auto",
+            self.beam_size,
+            self.best_of,
+        )
         self.model = WhisperModel(
             self.model_size,
             device=self.device,
@@ -65,14 +86,14 @@ class SpeechToText:
         with self._lock:
             segments, info = self.model.transcribe(
                 audio,
-                beam_size=1,                    # Greedy decode — fastest
-                best_of=1,                      # No sampling alternatives
+                beam_size=self.beam_size,
+                best_of=self.best_of,
                 vad_filter=False,               # OFF — Silero VAD already isolated speech
-                no_speech_threshold=0.6,        # Skip segments with high no-speech probability
-                log_prob_threshold=-1.0,        # Relaxed — don't drop valid short utterances
-                condition_on_previous_text=False,  # Faster, no cascading errors
-                language="en",                  # Skip language detection
-                initial_prompt="Phone call screening conversation.",  # Prime decoder for telephony context
+                no_speech_threshold=self.no_speech_threshold,
+                log_prob_threshold=self.log_prob_threshold,
+                condition_on_previous_text=self.condition_on_previous_text,
+                language=self.language.strip() or None,
+                initial_prompt=self.initial_prompt.strip() or None,
             )
 
             text_parts = []

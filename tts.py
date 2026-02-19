@@ -1,11 +1,28 @@
 """Chatterbox Turbo TTS wrapper — voice cloning and G.711 mu-law output for telephony."""
 
 import audioop
+import importlib.resources
 import logging
 import os
+import sys
 import time
+import types
+from pathlib import Path
 import numpy as np
 import torch
+from huggingface_hub import snapshot_download
+
+# Compatibility shim for Python environments where setuptools no longer provides
+# pkg_resources. perth currently imports pkg_resources.resource_filename.
+try:
+    import pkg_resources  # type: ignore  # noqa: F401
+except ModuleNotFoundError:
+    def _resource_filename(package_name: str, resource_name: str) -> str:
+        return str(importlib.resources.files(package_name).joinpath(resource_name))
+
+    pkg_resources = types.ModuleType("pkg_resources")  # type: ignore[assignment]
+    pkg_resources.resource_filename = _resource_filename  # type: ignore[attr-defined]
+    sys.modules["pkg_resources"] = pkg_resources
 
 import chatterbox.tts_turbo as chatterbox_turbo
 from chatterbox.tts_turbo import ChatterboxTurboTTS
@@ -29,6 +46,47 @@ if getattr(chatterbox_turbo.perth, "PerthImplicitWatermarker", None) is None:
     if getattr(chatterbox_turbo.perth, "DummyWatermarker", None) is not None:
         log.warning("PerthImplicitWatermarker unavailable; using DummyWatermarker fallback")
         chatterbox_turbo.perth.PerthImplicitWatermarker = chatterbox_turbo.perth.DummyWatermarker
+
+
+def _from_pretrained_optional_token(cls, device) -> "ChatterboxTurboTTS":
+    """Load Chatterbox model, allowing anonymous download for public repos."""
+    # Keep upstream MPS fallback behavior.
+    if device == "mps" and not torch.backends.mps.is_available():
+        if not torch.backends.mps.is_built():
+            print("MPS not available because the current PyTorch install was not built with MPS enabled.")
+        else:
+            print(
+                "MPS not available because the current MacOS version is not 12.3+ "
+                "and/or you do not have an MPS-enabled device on this machine."
+            )
+        device = "cpu"
+
+    token = (os.getenv("HF_TOKEN") or "").strip() or False
+    try:
+        local_path = snapshot_download(
+            repo_id=chatterbox_turbo.REPO_ID,
+            token=token,
+            allow_patterns=["*.safetensors", "*.json", "*.txt", "*.pt", "*.model"],
+        )
+    except Exception as e:
+        if token is False:
+            raise RuntimeError(
+                "Chatterbox model download failed without Hugging Face auth. "
+                "For fresh installs, set HF_TOKEN (or run `hf auth login`) and retry."
+            ) from e
+        raise
+
+    return cls.from_local(local_path, device)
+
+
+ChatterboxTurboTTS.from_pretrained = classmethod(_from_pretrained_optional_token)
+
+REQUIRED_MODEL_FILES = (
+    "ve.safetensors",
+    "t3_turbo_v1.safetensors",
+    "s3gen_meanflow.safetensors",
+)
+
 
 def _prepare_conditionals_f32(self, wav_fpath, exaggeration=0.5, norm_loudness=True):
     import librosa
@@ -126,25 +184,57 @@ class TTS:
         mulaw_bytes = tts.synthesize_mulaw("Hello, how can I help?")
     """
 
-    def __init__(self, voice_prompt: str | None = None, device: str = "cuda"):
+    def __init__(self, voice_prompt: str | None = None, device: str = "cuda",
+                 model_dir: str | None = None):
         """
         Args:
             voice_prompt: Path to a WAV file (>5s) for voice cloning.
                           If None, uses the built-in default voice.
             device: torch device ("cuda" or "cpu").
+            model_dir: Optional local directory containing pre-downloaded
+                       Chatterbox weights. If omitted, defaults to
+                       ./models/chatterbox when present.
         """
         import threading
         self.device = device
         self._voice_prompt = voice_prompt
+        self._model_dir = model_dir
         self._lock = threading.Lock()  # Protect model state from concurrent calls
 
         # Validate voice prompt file exists before loading model
         if voice_prompt and not os.path.isfile(voice_prompt):
             raise FileNotFoundError(f"TTS voice prompt file not found: {voice_prompt}")
 
+        # Resolve local bundled model directory (offline-first).
+        candidate_dirs: list[Path] = []
+        if model_dir:
+            candidate_dirs.append(Path(model_dir).expanduser())
+        repo_default = Path(__file__).resolve().parent / "models" / "chatterbox"
+        if not model_dir:
+            candidate_dirs.append(repo_default)
+
+        resolved_model_dir: Path | None = None
+        for candidate in candidate_dirs:
+            if candidate.is_dir():
+                missing = [f for f in REQUIRED_MODEL_FILES if not (candidate / f).is_file()]
+                if not missing:
+                    resolved_model_dir = candidate
+                    break
+                if model_dir:
+                    raise RuntimeError(
+                        f"TTS_MODEL_DIR is missing required files: {', '.join(missing)} "
+                        f"(path: {candidate})"
+                    )
+        if model_dir and not resolved_model_dir:
+            raise RuntimeError(f"TTS_MODEL_DIR directory not found or invalid: {model_dir}")
+
         log.info("Loading Chatterbox Turbo model on %s...", device)
         t0 = time.perf_counter()
-        self._model = ChatterboxTurboTTS.from_pretrained(device=device)
+        if resolved_model_dir:
+            log.info("Using bundled Chatterbox weights from: %s", resolved_model_dir)
+            self._model = ChatterboxTurboTTS.from_local(resolved_model_dir, device=device)
+        else:
+            self._model = ChatterboxTurboTTS.from_pretrained(device=device)
         load_ms = (time.perf_counter() - t0) * 1000
         log.info("Chatterbox Turbo loaded in %.0fms", load_ms)
 

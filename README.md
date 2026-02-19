@@ -19,7 +19,7 @@ Incoming call       |                          |
                     | Faster-Whisper STT       |
                     |   | (text)               |
                     |   v                      |
-                    | Local LLM (LM Studio)    |
+                    | Local LLM (LM Studio / Ollama) |
                     |   | (response text)      |
                     |   v                      |
                     | Chatterbox TTS           |
@@ -60,11 +60,21 @@ setup.bat               # Windows (or ./setup.sh on Linux/macOS)
 python main.py --demo
 ```
 
-On first run it will ask for your LLM server URL and API key (defaults work for LM Studio). Then open **http://localhost:8080/demo** in your browser, click **Start Demo Call**, and talk to HAL through your mic and speaker.
+On first run it will walk you through provider setup (`LM Studio`, `Ollama`, or another OpenAI-compatible server), then write a demo `.env`. After startup, open **http://localhost:8080/demo**. The demo UI includes readiness checks, a live config editor, and a real-time transcript display.
 
-You need [LM Studio](https://lmstudio.ai) (or any OpenAI-compatible LLM server) running before you start. Everything else -- speech-to-text, text-to-speech, voice activity detection -- runs locally with no accounts.
+You need a local LLM server running before you start. Everything else -- speech-to-text, text-to-speech, voice activity detection -- runs locally with no cloud AI API.
+
+> **Mic access:** Browsers require either `localhost` or HTTPS for microphone access. The demo auto-redirects LAN IPs to localhost. For remote access, use `--share` to create a public HTTPS tunnel.
 
 > **Tip:** Use headphones to avoid echo feedback.
+
+### Remote access with `--share`
+
+```bash
+python main.py --demo --share
+```
+
+This creates a public HTTPS URL (via Gradio's tunnel) so you can test from any device -- phone, tablet, another computer. Mic access works everywhere over HTTPS.
 
 ## Requirements
 
@@ -74,7 +84,7 @@ You need [LM Studio](https://lmstudio.ai) (or any OpenAI-compatible LLM server) 
 | **GPU** | Optional: NVIDIA CUDA recommended for best latency. CPU mode is supported (including macOS). |
 | **VRAM** | 16 GB+ recommended for full GPU stack (Whisper large-v3-turbo + Chatterbox Turbo + Silero VAD ~ 6 GB, plus your LLM) |
 | **SignalWire** | Account with a phone number ([signalwire.com](https://signalwire.com)) -- $0.50/mo for a number, ~$0.007/min for inbound calls. **Not needed for demo mode.** |
-| **Local LLM** | [LM Studio](https://lmstudio.ai) or any OpenAI-compatible API server |
+| **Local LLM** | [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com), or any OpenAI-compatible API server |
 | **Public endpoint** | HTTPS -- via Tailscale Funnel, Cloudflare Tunnel, ngrok, etc. **Not needed for demo mode.** |
 
 ## Quick start
@@ -100,9 +110,12 @@ cp .env.example .env     # then edit .env with your settings
 python main.py
 ```
 
-The setup script creates a virtual environment, installs CUDA PyTorch when an NVIDIA GPU is present (or CPU PyTorch otherwise), and handles all dependencies. On first run, models download automatically (~3 GB).
+The setup script creates a virtual environment, installs CUDA PyTorch when an NVIDIA GPU is present (or CPU PyTorch otherwise), and handles all dependencies.
 
-You also need a local LLM running -- open [LM Studio](https://lmstudio.ai), load a model, and start the server. The default config expects `http://127.0.0.1:1234/v1`.
+You also need a local LLM running:
+
+- **LM Studio:** default endpoint `http://127.0.0.1:1234/v1`
+- **Ollama:** use OpenAI-compatible endpoint `http://127.0.0.1:11434/v1`
 
 <details>
 <summary>Detailed setup guide</summary>
@@ -189,7 +202,8 @@ Optional but recommended:
 
 | Variable | What it is |
 |---|---|
-| `HF_TOKEN` | Hugging Face token -- needed to download the Chatterbox model on first run ([get one here](https://huggingface.co/settings/tokens)) |
+| `HF_TOKEN` | Optional Hugging Face token -- useful if anonymous model download fails or is rate-limited ([get one here](https://huggingface.co/settings/tokens)) |
+| `TTS_MODEL_DIR` | Optional local directory with pre-downloaded Chatterbox weights (for fully offline onboarding) |
 | `TTS_DEVICE` | `auto`, `cuda`, or `cpu` (default is `auto`) |
 | `TTS_VOICE_PROMPT` | Path to a WAV file (>5s) for voice cloning |
 | `NTFY_TOPIC` | [ntfy.sh](https://ntfy.sh) topic for call notifications |
@@ -199,9 +213,41 @@ See `.env.example` for the full list of options with defaults.
 
 ### Start your local LLM
 
-Open [LM Studio](https://lmstudio.ai) and load a model. The default config expects the server at `http://127.0.0.1:1234/v1`. Any OpenAI-compatible API works.
+Choose one:
+
+- **LM Studio**: open [LM Studio](https://lmstudio.ai), load a model, and start the local server at `http://127.0.0.1:1234/v1`.
+- **Ollama**: run:
+  ```bash
+  ollama pull qwen3:4b
+  ollama serve
+  ```
+  then use `LLM_BASE_URL=http://127.0.0.1:11434/v1` and `LLM_PROVIDER=ollama`.
+- **Other**: any OpenAI-compatible API endpoint is supported.
 
 Recommended models: anything fast with good instruction following. The default is `zai-org/glm-4.7-flash`.
+
+### Bundle Chatterbox Weights (offline onboarding)
+
+To avoid runtime model downloads, ship a local model bundle and point HAL at it:
+
+```bash
+# Download once into a distributable local folder
+python scripts/prefetch_chatterbox.py --output models/chatterbox
+```
+
+Set one of:
+
+- `TTS_MODEL_DIR=models/chatterbox` in `.env`, or
+- leave `TTS_MODEL_DIR` unset and place files in `models/chatterbox` (auto-detected).
+
+Required files in the bundle directory:
+
+- `ve.safetensors`
+- `t3_turbo_v1.safetensors`
+- `s3gen_meanflow.safetensors`
+- tokenizer files (`tokenizer.json`, `tokenizer_config.json`, etc.)
+
+When the bundle is present, HAL loads TTS fully local and does not call Hugging Face.
 
 ### Expose your server
 
@@ -304,6 +350,7 @@ Measured across 15 conversational exchanges over 3 live phone calls:
 |---|---|
 | `main.py` | Entry point -- loads models, pre-records greetings, starts server |
 | `server.py` | FastAPI app -- webhook, WebSocket media stream, demo endpoints, ntfy notifications |
+| `gradio_ui.py` | Gradio-based demo UI -- HAL eye, call controls, transcript, settings |
 | `call_handler.py` | Per-call pipeline -- VAD, STT, LLM, TTS, barge-in, recording |
 | `audio.py` | G.711 mu-law codec, resampling, Silero VAD wrapper |
 | `stt.py` | Faster-Whisper speech-to-text |
@@ -311,7 +358,6 @@ Measured across 15 conversational exchanges over 3 live phone calls:
 | `llm.py` | OpenAI-compatible LLM client with streaming sentence extraction |
 | `prompts.py` | HAL 9000 system prompt, greetings, summary prompt |
 | `config.py` | Dataclass config from environment variables |
-| `static/demo.html` | Browser-based demo client (used with `--demo` flag) |
 
 <details>
 <summary>Configuration reference</summary>
@@ -336,14 +382,23 @@ All settings are configured via environment variables (`.env` file).
 | `STT_MODEL` | `large-v3-turbo` | Faster-Whisper model size |
 | `STT_DEVICE` | `auto` | `auto`, `cuda`, or `cpu` |
 | `STT_COMPUTE_TYPE` | `auto` | `auto`, `float16`, `int8`, etc. |
+| `STT_LANGUAGE` | `en` | Language hint (`""` to auto-detect) |
+| `STT_BEAM_SIZE` | `1` | Beam width (higher can improve accuracy, slower) |
+| `STT_BEST_OF` | `1` | Number of sampled candidates |
+| `STT_NO_SPEECH_THRESHOLD` | `0.6` | Probability threshold for no-speech |
+| `STT_LOG_PROB_THRESHOLD` | `-1.0` | Minimum log-prob threshold |
+| `STT_CONDITION_ON_PREVIOUS_TEXT` | `false` | Use previous text as decoding context |
+| `STT_INITIAL_PROMPT` | `Phone call screening conversation.` | Initial prompt for decoder |
 | **LLM** | | |
+| `LLM_PROVIDER` | `auto` | `auto`, `lmstudio`, `ollama`, or `openai_compatible` |
 | `LLM_BASE_URL` | `http://127.0.0.1:1234/v1` | OpenAI-compatible API endpoint |
 | `LLM_API_KEY` | `lm-studio` | API key (LM Studio ignores this) |
 | `LLM_MODEL` | `zai-org/glm-4.7-flash` | Model name |
 | `LLM_MAX_TOKENS` | `200` | Max response tokens |
 | `LLM_TEMPERATURE` | `0.7` | Sampling temperature |
 | **TTS** | | |
-| `HF_TOKEN` | *(none)* | Hugging Face token for model download |
+| `HF_TOKEN` | *(none)* | Optional Hugging Face token for model download auth/rate limits |
+| `TTS_MODEL_DIR` | *(none)* | Local pre-downloaded Chatterbox model directory |
 | `TTS_DEVICE` | `auto` | `auto`, `cuda`, or `cpu` |
 | `TTS_VOICE_PROMPT` | *(none)* | Path to voice cloning WAV (>5s) |
 | **VAD** | | |
@@ -365,19 +420,22 @@ All settings are configured via environment variables (`.env` file).
 |---|---|
 | `ModuleNotFoundError: No module named 'chatterbox.tts_turbo'` | `chatterbox-tts` is too old. Run: `pip install --no-deps "chatterbox-tts>=0.1.5"` |
 | `Permission denied` under `venv/.../site-packages` | You likely ran setup with `sudo`. Fix with `sudo rm -rf venv` then rerun `./setup.sh` as your normal user. |
+| Demo mic doesn't work / no audio | Browsers require `localhost` or HTTPS for mic access. Use `http://localhost:8080/demo` (not a LAN IP). For remote access, use `python main.py --demo --share`. |
 | PyTorch CUDA not available after install | If you're on macOS/CPU this is expected: keep `STT_DEVICE=auto` and `TTS_DEVICE=auto`. If you're on NVIDIA, reinstall CUDA PyTorch: `pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124` |
-| Models download on every start | Set `HF_TOKEN` in `.env` so Hugging Face caches properly. First run downloads ~3 GB. |
-| Slow responses in CPU mode | Use a smaller STT model (`STT_MODEL=base`), keep `STT_COMPUTE_TYPE=auto`, and use a smaller local LLM model. |
+| Chatterbox model download fails without auth | Prefer shipping a local bundle (`TTS_MODEL_DIR` or `models/chatterbox`). Otherwise set `HF_TOKEN` in `.env` or run `hf auth login`, then restart. |
+| Slow responses in CPU mode | Set `STT_MODEL=base` and `STT_COMPUTE_TYPE=int8`, and use a smaller local LLM model. |
 | `CUDA out of memory` | Use a smaller STT model (`STT_MODEL=base`) or lower precision (`STT_COMPUTE_TYPE=int8`). |
-| Connection refused on port 1234 | Start LM Studio (or your LLM server) before running `python main.py`. |
+| Connection refused on port 1234/11434 | Start your LLM server first (`LM Studio` on 1234 or `Ollama` on 11434), then run `python main.py`. |
 
 ## Acknowledgments
 
 - [Chatterbox TTS](https://github.com/resemble-ai/chatterbox) by Resemble AI -- voice cloning
 - [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper) -- CTranslate2 Whisper implementation
 - [Silero VAD](https://github.com/snakers4/silero-vad) -- voice activity detection
+- [Gradio](https://gradio.app) -- demo UI and HTTPS tunneling
 - [SignalWire](https://signalwire.com) -- telephony
 - [LM Studio](https://lmstudio.ai) -- local LLM server
+- [Ollama](https://ollama.com) -- local LLM runtime
 - [ntfy](https://ntfy.sh) -- push notifications
 
 ## License

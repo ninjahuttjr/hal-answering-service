@@ -199,6 +199,15 @@ BANNER_DEMO = r"""
 """
 
 
+def _infer_llm_provider_from_url(base_url: str) -> str:
+    url = (base_url or "").strip().lower()
+    if "127.0.0.1:1234" in url or "localhost:1234" in url:
+        return "lmstudio"
+    if "127.0.0.1:11434" in url or "localhost:11434" in url or "ollama" in url:
+        return "ollama"
+    return "openai_compatible"
+
+
 def _demo_interactive_setup():
     """Prompt for LLM settings if no .env exists or LLM fields are defaults.
     Writes a minimal .env so settings persist for next run.
@@ -214,35 +223,98 @@ def _demo_interactive_setup():
         except ImportError:
             pass
 
-    # Check if LLM settings look configured (not just defaults / empty)
+    # Check if demo settings look configured
+    llm_provider = os.environ.get("LLM_PROVIDER", "").strip()
     llm_url = os.environ.get("LLM_BASE_URL", "").strip()
     llm_key = os.environ.get("LLM_API_KEY", "").strip()
+    llm_model = os.environ.get("LLM_MODEL", "").strip()
+    tts_model_dir = os.environ.get("TTS_MODEL_DIR", "").strip()
     owner = os.environ.get("OWNER_NAME", "").strip()
+    hf_token = os.environ.get("HF_TOKEN", "").strip()
 
-    needs_setup = not has_dotenv or (not llm_url and not llm_key and not owner)
+    needs_setup = not has_dotenv or not llm_url or not owner
     if not needs_setup:
         return  # Already configured
 
-    print("\n  No .env file found. Let's set up the basics for demo mode.\n")
+    if has_dotenv:
+        print("\n  Demo setup is incomplete. Let's fill in missing values.\n")
+    else:
+        print("\n  No .env file found. Let's set up demo mode.\n")
 
     def _ask(prompt: str, default: str) -> str:
         display = f"  {prompt} [{default}]: " if default else f"  {prompt}: "
         answer = input(display).strip()
         return answer if answer else default
 
-    llm_url = _ask("LLM server URL", "http://127.0.0.1:1234/v1")
-    llm_key = _ask("LLM API key", "lm-studio")
-    llm_model = _ask("LLM model name (leave blank for server default)", "")
-    owner_name = _ask("Your name (for greetings)", "Dave")
+    if not llm_provider:
+        llm_provider = _infer_llm_provider_from_url(llm_url) if llm_url else "lmstudio"
+
+    print("  LLM provider:")
+    print("    1) LM Studio")
+    print("    2) Ollama")
+    print("    3) Other OpenAI-compatible server")
+    default_choice = "1"
+    if llm_provider == "ollama":
+        default_choice = "2"
+    elif llm_provider == "openai_compatible":
+        default_choice = "3"
+    provider_choice = _ask("Choose provider", default_choice)
+    if provider_choice == "2":
+        llm_provider = "ollama"
+    elif provider_choice == "3":
+        llm_provider = "openai_compatible"
+    else:
+        llm_provider = "lmstudio"
+
+    default_url = llm_url
+    default_key = llm_key
+    default_model = llm_model
+    model_prompt = "LLM model name"
+    if llm_provider == "lmstudio":
+        default_url = default_url or "http://127.0.0.1:1234/v1"
+        default_key = default_key or "lm-studio"
+        model_prompt = "LLM model name (leave blank for server default)"
+    elif llm_provider == "ollama":
+        default_url = default_url or "http://127.0.0.1:11434/v1"
+        default_key = default_key or "ollama"
+        default_model = default_model or "qwen3:4b"
+        model_prompt = "Ollama model name (must match `ollama list`, e.g. qwen3:4b)"
+    else:
+        default_url = default_url or "http://127.0.0.1:1234/v1"
+        default_key = default_key or "local"
+        model_prompt = "LLM model name"
+
+    llm_url = _ask("LLM server URL", default_url)
+    llm_key = _ask("LLM API key", default_key)
+    llm_model = _ask(model_prompt, default_model)
+    owner_name = _ask("Your name (for greetings)", owner or "Dave")
+
+    bundled_default = os.path.join(os.path.dirname(__file__) or ".", "models", "chatterbox")
+    if not tts_model_dir and os.path.isdir(bundled_default):
+        tts_model_dir = bundled_default
+    tts_model_dir = _ask("Bundled TTS model dir (optional)", tts_model_dir)
+
+    hf_token = _ask("Hugging Face token (optional; helps first-run model download)", hf_token)
 
     # Write minimal .env
     lines = [
         "# HAL Answering Service — demo config (auto-generated)",
+        "HOST=127.0.0.1",
+        "PORT=8080",
+        "",
+        f"LLM_PROVIDER={llm_provider}",
         f"LLM_BASE_URL={llm_url}",
         f"LLM_API_KEY={llm_key}",
+        "STT_DEVICE=auto",
+        "STT_COMPUTE_TYPE=auto",
+        "TTS_DEVICE=auto",
     ]
+    if tts_model_dir:
+        lines.append(f"TTS_MODEL_DIR={tts_model_dir}")
     if llm_model:
         lines.append(f"LLM_MODEL={llm_model}")
+    if hf_token:
+        lines.append(f"HF_TOKEN={hf_token}")
     lines.append(f"OWNER_NAME={owner_name}")
     lines.append("")  # trailing newline
 
@@ -252,10 +324,15 @@ def _demo_interactive_setup():
     print(f"\n  Settings saved to {env_path}\n")
 
     # Put them in the environment immediately
+    os.environ["LLM_PROVIDER"] = llm_provider
     os.environ["LLM_BASE_URL"] = llm_url
     os.environ["LLM_API_KEY"] = llm_key
+    if tts_model_dir:
+        os.environ["TTS_MODEL_DIR"] = tts_model_dir
     if llm_model:
         os.environ["LLM_MODEL"] = llm_model
+    if hf_token:
+        os.environ["HF_TOKEN"] = hf_token
     os.environ["OWNER_NAME"] = owner_name
     # Stash demo owner name so it takes priority over .env OWNER_NAME
     os.environ["_DEMO_OWNER_NAME"] = owner_name
@@ -330,6 +407,8 @@ def main():
                         help="Start in demo mode (browser mic, no SignalWire needed)")
     parser.add_argument("--host", type=str, default=None,
                         help="Bind address (default: 0.0.0.0 for --demo, else from HOST env)")
+    parser.add_argument("--share", action="store_true",
+                        help="Create a public HTTPS URL for the demo (enables mic on any device)")
     args = parser.parse_args()
 
     # Load .env early so auto-detection can check SignalWire creds
@@ -398,6 +477,13 @@ def main():
         model_size=config.stt_model,
         device=stt_device,
         compute_type=stt_compute_type,
+        language=config.stt_language,
+        beam_size=config.stt_beam_size,
+        best_of=config.stt_best_of,
+        no_speech_threshold=config.stt_no_speech_threshold,
+        log_prob_threshold=config.stt_log_prob_threshold,
+        condition_on_previous_text=config.stt_condition_on_previous_text,
+        initial_prompt=config.stt_initial_prompt,
     )
     stt.load()
     log.info("STT loaded in %.1fs", time.perf_counter() - t0)
@@ -405,7 +491,8 @@ def main():
     # Load TTS (kept hot in memory)
     t0 = time.perf_counter()
     voice_prompt = config.tts_voice_prompt or None
-    tts = TTS(voice_prompt=voice_prompt, device=tts_device)
+    model_dir = config.tts_model_dir or None
+    tts = TTS(voice_prompt=voice_prompt, device=tts_device, model_dir=model_dir)
     log.info("TTS loaded in %.1fs", time.perf_counter() - t0)
 
     # Load VAD (shared across calls, deep-copied per call)
@@ -447,24 +534,49 @@ def main():
     app = create_app(config, stt, tts, vad_model, greeting_cache, silence_prompt_cache)
 
     total = time.perf_counter() - t_start
-    if args.demo:
-        log.info("Ready in %.1fs — open http://localhost:%d/demo in your browser",
-                 total, config.port)
-        if config.host == "0.0.0.0":
-            import socket
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                lan_ip = s.getsockname()[0]
-                s.close()
-                log.info("LAN access: http://%s:%d/demo", lan_ip, config.port)
-                log.info("Note: browsers require HTTPS for mic access on non-localhost.")
-                log.info("  Chrome: chrome://flags → 'Insecure origins treated as secure'")
-                log.info("    → add http://%s:%d → Relaunch Chrome", lan_ip, config.port)
-            except Exception:
-                pass
+    if is_demo:
+        log.info("=" * 55)
+        log.info("  DEMO READY: http://localhost:%d/demo", config.port)
+        log.info("  (Use localhost — LAN IPs block mic access)")
+        log.info("=" * 55)
+        if config.host == "0.0.0.0" and not args.share:
+            log.info("Tip: --share creates a public HTTPS URL (mic works everywhere)")
     else:
         log.info("Ready in %.1fs — listening on %s:%d", total, config.host, config.port)
+
+    # Start share tunnel if requested (creates a public HTTPS URL via Gradio)
+    share_url = None
+    if is_demo and args.share:
+        try:
+            from gradio import networking
+            share_token = ""
+            # Gradio's setup_tunnel expects (local_host, local_port, share_token, share_server_address)
+            # Use Gradio's defaults for the share server
+            share_server_address = None
+            try:
+                from gradio.networking import GRADIO_SHARE_SERVER_ADDRESS
+                share_server_address = GRADIO_SHARE_SERVER_ADDRESS
+            except ImportError:
+                share_server_address = None
+
+            if share_server_address:
+                share_url, _ = networking.setup_tunnel(
+                    "127.0.0.1", config.port, share_token, share_server_address
+                )
+            else:
+                # Gradio >= 4.x: try the simpler API
+                share_url, _ = networking.setup_tunnel(
+                    "127.0.0.1", config.port, share_token, None
+                )
+        except Exception as e:
+            log.warning("Could not create share tunnel: %s", e)
+            log.info("Tip: install gradio to enable --share, or use ngrok/cloudflared manually")
+
+        if share_url:
+            log.info("=" * 60)
+            log.info("  PUBLIC DEMO URL (HTTPS): %s/demo", share_url)
+            log.info("  Mic works on any device via this URL.")
+            log.info("=" * 60)
 
     uvicorn.run(app, host=config.host, port=config.port, log_level="warning",
                 ws_max_size=65536)

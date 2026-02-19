@@ -4,8 +4,12 @@ import asyncio
 import base64
 import binascii
 import collections
+import copy
 import json
 import logging
+import os
+import re
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -13,12 +17,12 @@ from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import Response, FileResponse, HTMLResponse
+from fastapi.responses import Response
 
 from config import Config
 from audio import SileroVAD
 from stt import SpeechToText
-from tts import TTS
+from tts import TTS, REQUIRED_MODEL_FILES
 from call_handler import CallHandler
 
 log = logging.getLogger(__name__)
@@ -42,6 +46,183 @@ MAX_VALIDATED_SIDS = 100
 WEBHOOK_RATE_LIMIT = 20           # max requests per window
 WEBHOOK_RATE_WINDOW_S = 60        # sliding window in seconds
 WEBHOOK_RATE_MAX_IPS = 500        # max tracked IPs (prevent memory exhaustion)
+
+
+DEMO_SETTINGS_FIELDS = [
+    # SignalWire
+    {"env": "SIGNALWIRE_PROJECT_ID", "attr": "signalwire_project_id", "type": "str",
+     "section": "SignalWire", "secret": False, "apply_runtime": False,
+     "description": "SignalWire project ID (production use)."},
+    {"env": "SIGNALWIRE_TOKEN", "attr": "signalwire_token", "type": "str",
+     "section": "SignalWire", "secret": True, "apply_runtime": False,
+     "description": "SignalWire API token (production use)."},
+    {"env": "SIGNALWIRE_SPACE", "attr": "signalwire_space", "type": "str",
+     "section": "SignalWire", "secret": False, "apply_runtime": False,
+     "description": "SignalWire space name."},
+    {"env": "SIGNALWIRE_PHONE_NUMBER", "attr": "signalwire_phone_number", "type": "str",
+     "section": "SignalWire", "secret": False, "apply_runtime": False,
+     "description": "Phone number used for inbound calls."},
+    {"env": "SIGNALWIRE_SIGNING_KEY", "attr": "signalwire_signing_key", "type": "str",
+     "section": "SignalWire", "secret": True, "apply_runtime": False,
+     "description": "Webhook signature validation key."},
+
+    # Server
+    {"env": "HOST", "attr": "host", "type": "str", "section": "Server", "secret": False,
+     "apply_runtime": False, "description": "Bind host (requires restart)."},
+    {"env": "PORT", "attr": "port", "type": "int", "section": "Server", "secret": False,
+     "apply_runtime": False, "description": "Bind port (requires restart)."},
+    {"env": "PUBLIC_HOST", "attr": "public_host", "type": "str", "section": "Server",
+     "secret": False, "apply_runtime": True, "description": "Public host for webhooks/streams."},
+    {"env": "MAX_CONCURRENT_CALLS", "attr": "max_concurrent_calls", "type": "int",
+     "section": "Server", "secret": False, "apply_runtime": True,
+     "description": "Max concurrent calls."},
+    {"env": "MAX_CALL_DURATION_S", "attr": "max_call_duration_s", "type": "int",
+     "section": "Server", "secret": False, "apply_runtime": True,
+     "description": "Max call duration in seconds."},
+
+    # STT
+    {"env": "STT_MODEL", "attr": "stt_model", "type": "str", "section": "STT", "secret": False,
+     "apply_runtime": False, "description": "Whisper model size (requires restart)."},
+    {"env": "STT_DEVICE", "attr": "stt_device", "type": "str", "section": "STT", "secret": False,
+     "apply_runtime": False, "description": "STT runtime device (requires restart)."},
+    {"env": "STT_COMPUTE_TYPE", "attr": "stt_compute_type", "type": "str", "section": "STT",
+     "secret": False, "apply_runtime": False, "description": "STT precision/compute type (restart)."},
+    {"env": "STT_LANGUAGE", "attr": "stt_language", "type": "str", "section": "STT",
+     "secret": False, "apply_runtime": True, "description": "Language code (blank for auto-detect)."},
+    {"env": "STT_BEAM_SIZE", "attr": "stt_beam_size", "type": "int", "section": "STT",
+     "secret": False, "apply_runtime": True, "description": "Beam width (1 = fastest)."},
+    {"env": "STT_BEST_OF", "attr": "stt_best_of", "type": "int", "section": "STT",
+     "secret": False, "apply_runtime": True, "description": "Candidate samples per segment."},
+    {"env": "STT_NO_SPEECH_THRESHOLD", "attr": "stt_no_speech_threshold", "type": "float", "section": "STT",
+     "secret": False, "apply_runtime": True, "description": "Reject threshold for likely silence."},
+    {"env": "STT_LOG_PROB_THRESHOLD", "attr": "stt_log_prob_threshold", "type": "float", "section": "STT",
+     "secret": False, "apply_runtime": True, "description": "Minimum log-prob threshold."},
+    {"env": "STT_CONDITION_ON_PREVIOUS_TEXT", "attr": "stt_condition_on_previous_text", "type": "bool",
+     "section": "STT", "secret": False, "apply_runtime": True,
+     "description": "Carry prior context between segments (accuracy vs speed)."},
+    {"env": "STT_INITIAL_PROMPT", "attr": "stt_initial_prompt", "type": "str", "section": "STT",
+     "secret": False, "apply_runtime": True, "description": "Priming prompt for Whisper decoding."},
+
+    # LLM
+    {"env": "LLM_PROVIDER", "attr": "llm_provider", "type": "str", "section": "LLM",
+     "secret": False, "apply_runtime": True, "description": "auto, lmstudio, ollama, openai_compatible."},
+    {"env": "LLM_BASE_URL", "attr": "llm_base_url", "type": "str", "section": "LLM",
+     "secret": False, "apply_runtime": True, "description": "OpenAI-compatible base URL."},
+    {"env": "LLM_API_KEY", "attr": "llm_api_key", "type": "str", "section": "LLM",
+     "secret": True, "apply_runtime": True, "description": "API key for LLM endpoint."},
+    {"env": "LLM_MODEL", "attr": "llm_model", "type": "str", "section": "LLM",
+     "secret": False, "apply_runtime": True, "description": "Model name for chat completions."},
+    {"env": "LLM_MAX_TOKENS", "attr": "llm_max_tokens", "type": "int", "section": "LLM",
+     "secret": False, "apply_runtime": True, "description": "Max output tokens per response."},
+    {"env": "LLM_TEMPERATURE", "attr": "llm_temperature", "type": "float", "section": "LLM",
+     "secret": False, "apply_runtime": True, "description": "Sampling temperature."},
+    {"env": "LLM_FREQUENCY_PENALTY", "attr": "llm_frequency_penalty", "type": "float", "section": "LLM",
+     "secret": False, "apply_runtime": True, "description": "Repetition penalty."},
+
+    # TTS
+    {"env": "TTS_DEVICE", "attr": "tts_device", "type": "str", "section": "TTS",
+     "secret": False, "apply_runtime": False, "description": "TTS runtime device (requires restart)."},
+    {"env": "TTS_MODEL_DIR", "attr": "tts_model_dir", "type": "str", "section": "TTS",
+     "secret": False, "apply_runtime": False, "description": "Local bundled Chatterbox model dir."},
+    {"env": "TTS_VOICE_PROMPT", "attr": "tts_voice_prompt", "type": "str", "section": "TTS",
+     "secret": False, "apply_runtime": False, "description": "Voice prompt WAV path (requires restart)."},
+    {"env": "HF_TOKEN", "attr": None, "type": "str", "section": "TTS",
+     "secret": True, "apply_runtime": False, "description": "HF auth token used by fallback downloader."},
+
+    # VAD
+    {"env": "VAD_SPEECH_THRESHOLD", "attr": "vad_speech_threshold", "type": "float", "section": "VAD",
+     "secret": False, "apply_runtime": True, "description": "Speech probability threshold."},
+    {"env": "VAD_SILENCE_THRESHOLD_MS", "attr": "vad_silence_threshold_ms", "type": "int", "section": "VAD",
+     "secret": False, "apply_runtime": True, "description": "Silence threshold in ms."},
+    {"env": "VAD_MIN_SPEECH_MS", "attr": "vad_min_speech_ms", "type": "int", "section": "VAD",
+     "secret": False, "apply_runtime": True, "description": "Minimum speech duration in ms."},
+
+    # Storage & notifications
+    {"env": "RECORDINGS_DIR", "attr": "recordings_dir", "type": "str", "section": "Storage",
+     "secret": False, "apply_runtime": True, "description": "Directory for recordings."},
+    {"env": "METADATA_DIR", "attr": "metadata_dir", "type": "str", "section": "Storage",
+     "secret": False, "apply_runtime": True, "description": "Directory for metadata JSON."},
+    {"env": "NTFY_TOPIC", "attr": "ntfy_topic", "type": "str", "section": "Notifications",
+     "secret": False, "apply_runtime": True, "description": "ntfy.sh topic for notifications."},
+    {"env": "NTFY_TOKEN", "attr": "ntfy_token", "type": "str", "section": "Notifications",
+     "secret": True, "apply_runtime": True, "description": "ntfy auth token."},
+
+    # Owner
+    {"env": "OWNER_NAME", "attr": "owner_name", "type": "str", "section": "General",
+     "secret": False, "apply_runtime": True, "description": "Name used in greetings/prompts."},
+]
+
+_DEMO_FIELD_BY_ENV = {f["env"]: f for f in DEMO_SETTINGS_FIELDS}
+_DEMO_STT_RUNTIME_ATTR_MAP = {
+    "STT_LANGUAGE": "language",
+    "STT_BEAM_SIZE": "beam_size",
+    "STT_BEST_OF": "best_of",
+    "STT_NO_SPEECH_THRESHOLD": "no_speech_threshold",
+    "STT_LOG_PROB_THRESHOLD": "log_prob_threshold",
+    "STT_CONDITION_ON_PREVIOUS_TEXT": "condition_on_previous_text",
+    "STT_INITIAL_PROMPT": "initial_prompt",
+}
+
+
+def _typed_value(raw: str, type_name: str):
+    if type_name == "int":
+        return int(raw)
+    if type_name == "float":
+        return float(raw)
+    if type_name == "bool":
+        normalized = raw.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError("must be true/false")
+    return raw
+
+
+def _stringify_value(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _format_env_value(raw: str) -> str:
+    value = (raw or "").replace("\r", " ").replace("\n", " ")
+    if not value:
+        return ""
+    # Quote values containing spaces, comments, or quotes.
+    if re.search(r"\s|#|\"|'|=", value):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
+def _upsert_env_file(path: Path, updates: dict[str, str]):
+    lines: list[str] = []
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines()
+
+    key_re = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        match = key_re.match(line)
+        if not match:
+            out.append(line)
+            continue
+        key = match.group(1)
+        if key in updates:
+            out.append(f"{key}={_format_env_value(updates[key])}")
+            seen.add(key)
+        else:
+            out.append(line)
+
+    for key, value in updates.items():
+        if key not in seen:
+            out.append(f"{key}={_format_env_value(value)}")
+
+    path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
 
 
 def _validate_webhook(config: Config, request: Request, form: dict) -> bool:
@@ -460,16 +641,328 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
     MAX_DEMO_SESSIONS = 2
     _demo_session_count = 0
 
-    @app.get("/demo")
-    async def demo_page():
-        """Serve the browser-based demo client."""
+    @app.get("/demo/status")
+    async def demo_status():
+        """Runtime readiness checks used by the demo UI."""
         if not config.demo_mode:
             return Response(content="Demo mode not enabled. Start with: python main.py --demo",
                             status_code=403)
-        demo_path = Path(__file__).parent / "static" / "demo.html"
-        if not demo_path.is_file():
-            return Response(content="Demo page not found", status_code=404)
-        return FileResponse(demo_path, media_type="text/html")
+
+        checks: list[dict] = []
+
+        def _add_check(check_id: str, ok: bool, message: str, severity: str = "error"):
+            checks.append({
+                "id": check_id,
+                "ok": ok,
+                "severity": severity,
+                "message": message,
+            })
+
+        def _extract_model_ids(payload: dict) -> list[str]:
+            model_ids: list[str] = []
+            if isinstance(payload, dict):
+                # OpenAI-compatible: {"data": [{"id": "..."}]}
+                data = payload.get("data")
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            mid = str(item.get("id", "")).strip()
+                            if mid:
+                                model_ids.append(mid)
+                # Ollama native tags endpoint: {"models": [{"name": "..."}]}
+                tags = payload.get("models")
+                if isinstance(tags, list):
+                    for item in tags:
+                        if isinstance(item, dict):
+                            mid = str(item.get("name", "")).strip()
+                            if mid:
+                                model_ids.append(mid)
+            return sorted(set(model_ids))
+
+        llm_models: list[str] = []
+        llm_ok = False
+        llm_message = "Unknown LLM status"
+        llm_base_url = (config.llm_base_url or "").rstrip("/")
+        headers = {}
+        if config.llm_api_key:
+            headers["Authorization"] = f"Bearer {config.llm_api_key}"
+
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=2.5) as client:
+                models_url = f"{llm_base_url}/models" if llm_base_url else ""
+                if models_url:
+                    resp = await client.get(models_url, headers=headers)
+                    if resp.status_code == 200:
+                        llm_ok = True
+                        payload = resp.json()
+                        llm_models = _extract_model_ids(payload)
+                        llm_message = f"Connected to LLM endpoint ({models_url})"
+                    else:
+                        llm_message = (
+                            f"LLM endpoint returned HTTP {resp.status_code} at {models_url}"
+                        )
+
+                # Fallback for Ollama native endpoint when /v1/models is unavailable.
+                if not llm_ok and llm_base_url:
+                    base = llm_base_url[:-3] if llm_base_url.endswith("/v1") else llm_base_url
+                    tags_url = f"{base}/api/tags"
+                    resp = await client.get(tags_url)
+                    if resp.status_code == 200:
+                        llm_ok = True
+                        payload = resp.json()
+                        llm_models = _extract_model_ids(payload)
+                        llm_message = f"Connected to Ollama endpoint ({tags_url})"
+        except Exception as e:
+            llm_message = f"Could not reach LLM endpoint ({llm_base_url}): {type(e).__name__}"
+
+        _add_check("llm_reachable", llm_ok, llm_message)
+
+        if llm_ok:
+            configured_model = (config.llm_model or "").strip()
+            if configured_model:
+                model_match = configured_model in llm_models if llm_models else True
+                if model_match:
+                    _add_check("llm_model", True, f"Configured model: {configured_model}", "info")
+                else:
+                    _add_check(
+                        "llm_model",
+                        False,
+                        f"Configured model '{configured_model}' not found on endpoint.",
+                        "warning",
+                    )
+            else:
+                _add_check("llm_model", True, "No explicit model set; server default will be used.", "info")
+
+        # TTS voice prompt status
+        if config.tts_voice_prompt:
+            voice_ok = Path(config.tts_voice_prompt).is_file()
+            if voice_ok:
+                _add_check("voice_prompt", True, f"Voice prompt found: {config.tts_voice_prompt}", "info")
+            else:
+                _add_check("voice_prompt", False, f"Voice prompt not found: {config.tts_voice_prompt}")
+        else:
+            _add_check("voice_prompt", True, "No custom voice prompt; using default Chatterbox voice.", "info")
+
+        # Chatterbox model source status (prefer bundled local dir when available).
+        bundle_dir: Path | None = None
+        if config.tts_model_dir:
+            bundle_dir = Path(config.tts_model_dir)
+        else:
+            default_bundle = Path(__file__).parent / "models" / "chatterbox"
+            if default_bundle.is_dir():
+                bundle_dir = default_bundle
+
+        if bundle_dir:
+            missing_files = [f for f in REQUIRED_MODEL_FILES if not (bundle_dir / f).is_file()]
+            if missing_files:
+                _add_check(
+                    "tts_model_bundle",
+                    False,
+                    f"Bundled TTS model dir missing files ({', '.join(missing_files)}): {bundle_dir}",
+                )
+            else:
+                _add_check("tts_model_bundle", True, f"Using bundled TTS model dir: {bundle_dir}", "info")
+        else:
+            _add_check(
+                "tts_model_bundle",
+                True,
+                "No bundled TTS model dir detected; startup will use HF download/cache path.",
+                "warning",
+            )
+
+        # Runtime informational checks
+        _add_check("sessions", _demo_session_count < MAX_DEMO_SESSIONS,
+                   f"Demo sessions in use: {_demo_session_count}/{MAX_DEMO_SESSIONS}",
+                   "warning" if _demo_session_count >= MAX_DEMO_SESSIONS else "info")
+        _add_check("capacity", len(active_calls) < config.max_concurrent_calls,
+                   f"Call capacity in use: {len(active_calls)}/{config.max_concurrent_calls}",
+                   "warning" if len(active_calls) >= config.max_concurrent_calls else "info")
+
+        has_error = any((not c["ok"]) and c["severity"] == "error" for c in checks)
+        has_warning = any((not c["ok"]) and c["severity"] == "warning" for c in checks)
+        readiness = "ready" if not has_error and not has_warning else ("warning" if not has_error else "blocked")
+
+        return {
+            "ready": not has_error,
+            "readiness": readiness,
+            "checks": checks,
+            "llm_provider": config.llm_provider,
+            "llm_base_url": config.llm_base_url,
+            "llm_model": config.llm_model,
+            "demo_sessions": _demo_session_count,
+            "max_demo_sessions": MAX_DEMO_SESSIONS,
+            "active_calls": len(active_calls),
+            "max_calls": config.max_concurrent_calls,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "available_models": llm_models[:50],
+        }
+
+    @app.get("/demo/config")
+    async def demo_config():
+        """Return editable configuration for the demo UI."""
+        if not config.demo_mode:
+            return Response(content="Demo mode not enabled. Start with: python main.py --demo",
+                            status_code=403)
+
+        values = {}
+        for field in DEMO_SETTINGS_FIELDS:
+            env_key = field["env"]
+            attr = field["attr"]
+            if attr and hasattr(config, attr):
+                values[env_key] = _stringify_value(getattr(config, attr))
+            else:
+                values[env_key] = os.environ.get(env_key, "")
+
+        return {
+            "fields": DEMO_SETTINGS_FIELDS,
+            "values": values,
+        }
+
+    @app.post("/demo/config")
+    async def demo_config_update(request: Request):
+        """Apply runtime config changes and/or persist them to .env."""
+        if not config.demo_mode:
+            return Response(content="Demo mode not enabled. Start with: python main.py --demo",
+                            status_code=403)
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return Response(content="Invalid JSON payload", status_code=400)
+
+        values = payload.get("values", {})
+        apply_runtime = bool(payload.get("apply_runtime", True))
+        save = bool(payload.get("save", False))
+
+        if not isinstance(values, dict):
+            return Response(content="'values' must be an object", status_code=400)
+
+        unknown = sorted([k for k in values if k not in _DEMO_FIELD_BY_ENV])
+        if unknown:
+            return Response(content=f"Unknown config keys: {', '.join(unknown)}", status_code=400)
+
+        env_updates: dict[str, str] = {}
+        attr_updates: dict[str, object] = {}
+        applied_runtime: list[str] = []
+        requires_restart: list[str] = []
+        parse_errors: list[str] = []
+
+        for env_key, raw in values.items():
+            field = _DEMO_FIELD_BY_ENV[env_key]
+            raw_str = "" if raw is None else str(raw)
+            attr = field["attr"]
+            if attr and hasattr(config, attr):
+                current_raw = _stringify_value(getattr(config, attr))
+            else:
+                current_raw = os.environ.get(env_key, "")
+            if raw_str == current_raw:
+                continue
+
+            env_updates[env_key] = raw_str
+
+            try:
+                # Empty string is valid for str fields, but not int/float.
+                if field["type"] in ("int", "float") and raw_str.strip() == "":
+                    raise ValueError("cannot be empty")
+                typed = _typed_value(raw_str, field["type"])
+            except Exception as e:
+                parse_errors.append(f"{env_key}: {e}")
+                continue
+
+            if attr:
+                attr_updates[attr] = typed
+
+            if field["apply_runtime"]:
+                applied_runtime.append(env_key)
+            else:
+                requires_restart.append(env_key)
+
+        if parse_errors:
+            return Response(
+                content="Invalid config values:\n" + "\n".join(parse_errors),
+                status_code=422,
+            )
+
+        if not env_updates:
+            current_values = {}
+            for field in DEMO_SETTINGS_FIELDS:
+                env_key = field["env"]
+                attr = field["attr"]
+                if attr and hasattr(config, attr):
+                    current_values[env_key] = _stringify_value(getattr(config, attr))
+                else:
+                    current_values[env_key] = os.environ.get(env_key, "")
+            return {
+                "ok": True,
+                "applied_runtime": [],
+                "requires_restart": [],
+                "saved": False,
+                "values": current_values,
+            }
+
+        # Validate resulting config values before applying/saving.
+        try:
+            candidate = copy.copy(config)
+            for attr, typed in attr_updates.items():
+                setattr(candidate, attr, typed)
+            candidate.__post_init__()
+        except Exception as e:
+            return Response(content=str(e), status_code=422)
+
+        if apply_runtime:
+            for env_key in applied_runtime:
+                field = _DEMO_FIELD_BY_ENV[env_key]
+                attr = field["attr"]
+                if attr and attr in attr_updates:
+                    setattr(config, attr, attr_updates[attr])
+                    stt_attr = _DEMO_STT_RUNTIME_ATTR_MAP.get(env_key)
+                    if stt_attr and hasattr(stt, stt_attr):
+                        setattr(stt, stt_attr, attr_updates[attr])
+                os.environ[env_key] = env_updates[env_key]
+
+        if save:
+            env_path = Path(__file__).parent / ".env"
+            _upsert_env_file(env_path, env_updates)
+
+        current_values = {}
+        for field in DEMO_SETTINGS_FIELDS:
+            env_key = field["env"]
+            attr = field["attr"]
+            if attr and hasattr(config, attr):
+                current_values[env_key] = _stringify_value(getattr(config, attr))
+            else:
+                current_values[env_key] = os.environ.get(env_key, "")
+
+        return {
+            "ok": True,
+            "applied_runtime": applied_runtime if apply_runtime else [],
+            "requires_restart": requires_restart,
+            "saved": save,
+            "values": current_values,
+        }
+
+    @app.post("/demo/restart")
+    async def demo_restart():
+        """Restart the HAL process (demo mode only)."""
+        if not config.demo_mode:
+            return Response(content="Demo mode not enabled. Start with: python main.py --demo",
+                            status_code=403)
+        if active_calls:
+            return Response(content="Cannot restart while calls are active.", status_code=409)
+
+        async def _restart_soon():
+            await asyncio.sleep(0.6)
+            try:
+                python = sys.executable
+                argv = [python] + sys.argv
+                log.warning("Restarting HAL process via /demo/restart")
+                os.execv(python, argv)
+            except Exception as e:
+                log.error("Failed to restart HAL process: %s", e)
+
+        asyncio.create_task(_restart_soon())
+        return {"ok": True, "message": "Restarting HAL..."}
 
     @app.websocket("/demo-stream")
     async def demo_stream(ws: WebSocket):
@@ -697,6 +1190,56 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
             await _cancel_task(duration_task)
             await _cancel_task(hangup_task)
             _demo_session_count = max(0, _demo_session_count - 1)
+
+    # ── Gradio demo UI ──
+    if config.demo_mode:
+        try:
+            import gradio as gr
+            from gradio_ui import create_gradio_app
+
+            # Wrap the existing endpoint handlers as plain async callables.
+            # demo_status() returns a dict; demo_config_update() expects a Request.
+            async def _gradio_status_checker():
+                return await demo_status()
+
+            async def _gradio_config_writer(payload):
+                class _Payload:
+                    async def json(self):
+                        return payload
+                return await demo_config_update(_Payload())
+
+            gradio_demo = create_gradio_app(
+                config=config,
+                status_checker=_gradio_status_checker,
+                config_writer=_gradio_config_writer,
+            )
+            from gradio_ui import HAL_CSS, HAL_JS
+            # Gradio 6.x mount_gradio_app stores js= in gradio_config but
+            # never executes it. Use head= to inject a self-executing script.
+            # We poll for the HAL eye element (rendered by gr.HTML via Svelte)
+            # before initializing, since DOMContentLoaded fires too early.
+            hal_head = (
+                "<script>"
+                "(function _halBoot(){"
+                "  if(document.getElementById('hal-eye')){"
+                f"    ({HAL_JS})();"
+                "  } else {"
+                "    setTimeout(_halBoot, 100);"
+                "  }"
+                "})();"
+                "</script>"
+            )
+            app = gr.mount_gradio_app(
+                app, gradio_demo, path="/demo",
+                css=HAL_CSS,
+                head=hal_head,
+                footer_links=[],
+            )
+            log.info("Gradio demo UI mounted at /demo")
+        except ImportError:
+            log.error("Gradio not installed — install with: pip install 'gradio>=5.0.0'")
+        except Exception as e:
+            log.error("Failed to mount Gradio UI: %s", e)
 
     return app
 

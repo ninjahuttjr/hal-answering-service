@@ -22,6 +22,9 @@ recordings/
 metadata/
 *.log
 
+# Model weights (large binaries — use scripts/prefetch_chatterbox.py to download)
+models/
+
 # IDE
 .vscode/
 .idea/

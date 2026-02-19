@@ -16,6 +16,7 @@ SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
 
 MAX_HISTORY_MESSAGES = 100  # 50 turns (user + assistant) — scammer calls need long context
 MAX_SENTENCES_PER_RESPONSE = 6  # Phone calls: 1-2 normal, 6 is generous safety cap
+SUPPORTED_LLM_PROVIDERS = {"auto", "lmstudio", "ollama", "openai_compatible"}
 
 # GLM-4 special tokens and other garbage that can leak from LLMs
 _GARBAGE_RE = re.compile(
@@ -28,6 +29,33 @@ _GARBAGE_RE = re.compile(
     r'|</?think>'               # GLM thinking tags that leak through
     , re.IGNORECASE
 )
+
+
+def _normalize_provider(value: str) -> str:
+    provider = (value or "auto").strip().lower()
+    return provider if provider in SUPPORTED_LLM_PROVIDERS else "auto"
+
+
+def _infer_provider(base_url: str) -> str:
+    url = (base_url or "").strip().lower()
+    if "127.0.0.1:1234" in url or "localhost:1234" in url:
+        return "lmstudio"
+    if "127.0.0.1:11434" in url or "localhost:11434" in url or "ollama" in url:
+        return "ollama"
+    return "openai_compatible"
+
+
+def _looks_like_extra_body_issue(exc: Exception) -> bool:
+    text = str(exc).lower()
+    hints = (
+        "chat_template_kwargs",
+        "enable_thinking",
+        "extra_body",
+        "unknown field",
+        "unknown parameter",
+        "invalid parameter",
+    )
+    return any(h in text for h in hints)
 
 
 def _sanitize(text: str) -> str:
@@ -72,11 +100,16 @@ class LLMClient:
 
     def __init__(self, config: Config):
         self.config = config
+        requested = _normalize_provider(config.llm_provider)
+        self.provider = _infer_provider(config.llm_base_url) if requested == "auto" else requested
+        self._client_base_url = config.llm_base_url
+        self._client_api_key = config.llm_api_key
         self.client = OpenAI(
-            base_url=config.llm_base_url,
-            api_key=config.llm_api_key,
+            base_url=self._client_base_url,
+            api_key=self._client_api_key,
         )
         self.history: list[dict] = []
+        log.info("LLM provider: %s (base_url=%s)", self.provider, config.llm_base_url)
 
     def reset_history(self):
         """Clear conversation history."""
@@ -99,6 +132,53 @@ class LLMClient:
         system_prompt = build_system_prompt(owner_name=self.config.owner_name)
         return [{"role": "system", "content": system_prompt}] + self.history
 
+    def _refresh_client_if_needed(self):
+        """Recreate OpenAI client if base URL or API key changed at runtime."""
+        desired_url = self.config.llm_base_url
+        desired_key = self.config.llm_api_key
+        if desired_url == self._client_base_url and desired_key == self._client_api_key:
+            return
+        self._client_base_url = desired_url
+        self._client_api_key = desired_key
+        self.client = OpenAI(base_url=desired_url, api_key=desired_key)
+        requested = _normalize_provider(self.config.llm_provider)
+        self.provider = _infer_provider(desired_url) if requested == "auto" else requested
+        log.info("LLM client reloaded (provider=%s, base_url=%s)", self.provider, desired_url)
+
+    def _build_chat_kwargs(self, messages: list[dict], stream: bool, max_tokens: int,
+                           temperature: float) -> dict:
+        kwargs = dict(
+            model=self.config.llm_model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stream=stream,
+        )
+        if self.config.llm_frequency_penalty:
+            kwargs["frequency_penalty"] = self.config.llm_frequency_penalty
+        # LM Studio-specific flag to disable thinking/reasoning mode.
+        if self.provider == "lmstudio":
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        return kwargs
+
+    def _create_chat_completion(self, messages: list[dict], stream: bool, max_tokens: int,
+                                temperature: float):
+        kwargs = self._build_chat_kwargs(
+            messages=messages,
+            stream=stream,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        try:
+            return self.client.chat.completions.create(**kwargs)
+        except Exception as e:
+            if self.provider == "lmstudio" and "extra_body" in kwargs and _looks_like_extra_body_issue(e):
+                retry_kwargs = dict(kwargs)
+                retry_kwargs.pop("extra_body", None)
+                log.warning("LLM backend rejected LM Studio extras; retrying without extra_body")
+                return self.client.chat.completions.create(**retry_kwargs)
+            raise
+
     def chat_stream_sentences(self, text: str) -> Generator[tuple[str, bool], None, None]:
         """
         Send user text to LLM and yield (sentence, is_final) tuples
@@ -115,21 +195,17 @@ class LLMClient:
             (sentence, is_final) — sentence text and whether it's the last one.
         """
         messages = self._build_messages()
+        self._refresh_client_if_needed()
 
         log.info("LLM request: %d messages, last user: %s", len(messages), text[:80])
 
         try:
-            kwargs = dict(
-                model=self.config.llm_model,
+            stream = self._create_chat_completion(
                 messages=messages,
+                stream=True,
                 max_tokens=self.config.llm_max_tokens,
                 temperature=self.config.llm_temperature,
-                stream=True,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
-            if self.config.llm_frequency_penalty:
-                kwargs["frequency_penalty"] = self.config.llm_frequency_penalty
-            stream = self.client.chat.completions.create(**kwargs)
         except Exception as e:
             log.error("LLM stream creation failed: %s", e)
             return
@@ -228,17 +304,17 @@ class LLMClient:
     def get_summary(self, transcript: list[dict]) -> str:
         """Generate a call summary using the LLM."""
         prompt = build_summary_prompt(transcript)
+        self._refresh_client_if_needed()
         messages = [
             {"role": "system", "content": "You are a helpful assistant that summarizes phone calls."},
             {"role": "user", "content": prompt},
         ]
 
-        response = self.client.chat.completions.create(
-            model=self.config.llm_model,
+        response = self._create_chat_completion(
             messages=messages,
+            stream=False,
             max_tokens=300,
             temperature=0.3,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         result = response.choices[0].message
         content = result.content or ""
