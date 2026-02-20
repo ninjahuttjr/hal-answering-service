@@ -45,11 +45,11 @@ graph TD
 - **Security:** Webhook signature validation, input truncation, XML escaping, prompt injection hardening.
 - **Customizable personality:** HAL 9000 is just the default. Change the system prompt in `prompts.py` and swap the voice WAV file to create any character you want.
 
-## Example call
+## Demo
 
-HAL vs. a warranty scammer — keeps him on the line with increasingly specific questions until Dave gives up:
+HAL vs. a vehicle warranty scammer — both sides are fully live LLM, nothing is scripted. HAL wastes the caller's time with bureaucratic precision until Dave gives up:
 
-<video src="https://github.com/user-attachments/assets/7e27ed27-0f59-45ed-8797-0300f976b2f6" controls></video>
+<video src="https://github.com/user-attachments/assets/c27aabfe-299a-4a45-bbd8-843adfac2e37" controls></video>
 
 ## Try it now (demo mode)
 
