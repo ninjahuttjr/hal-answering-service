@@ -30,8 +30,5 @@ s3tokenizer>=0.2.0
 einops>=0.7.0
 numexpr>=2.8.0
 
-# UI (demo mode)
-gradio>=5.0.0
-
 # Telephony
 signalwire

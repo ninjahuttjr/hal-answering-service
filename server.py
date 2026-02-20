@@ -1191,51 +1191,18 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
             await _cancel_task(hangup_task)
             _demo_session_count = max(0, _demo_session_count - 1)
 
-    # ── Gradio demo UI ──
+    # ── Native HTML demo UI ──
     if config.demo_mode:
-        try:
-            import gradio as gr
-            from gradio_ui import create_gradio_app
+        from demo_ui import get_demo_html
+        from fastapi.responses import HTMLResponse
 
-            # Wrap the existing endpoint handlers as plain async callables.
-            # demo_status() returns a dict; demo_config_update() expects a Request.
-            async def _gradio_status_checker():
-                return await demo_status()
-
-            async def _gradio_config_writer(payload):
-                class _Payload:
-                    async def json(self):
-                        return payload
-                return await demo_config_update(_Payload())
-
-            from gradio_ui import HAL_CSS, HAL_JS
-            # Inject CSS and JS via gr.Blocks constructor (works on Gradio 5.x and 6.x).
-            # We poll for the HAL eye element (rendered by gr.HTML via Svelte)
-            # before initializing, since DOMContentLoaded fires too early.
-            hal_head = (
-                "<script>"
-                "(function _halBoot(){"
-                "  if(document.getElementById('hal-eye')){"
-                f"    ({HAL_JS})();"
-                "  } else {"
-                "    setTimeout(_halBoot, 100);"
-                "  }"
-                "})();"
-                "</script>"
-            )
-            gradio_demo = create_gradio_app(
-                config=config,
-                status_checker=_gradio_status_checker,
-                config_writer=_gradio_config_writer,
-                css=HAL_CSS,
-                head=hal_head,
-            )
-            app = gr.mount_gradio_app(app, gradio_demo, path="/demo")
-            log.info("Gradio demo UI mounted at /demo")
-        except ImportError:
-            log.error("Gradio not installed — install with: pip install 'gradio>=5.0.0'")
-        except Exception as e:
-            log.error("Failed to mount Gradio UI: %s", e)
+        @app.get("/demo")
+        async def demo_page():
+            status_data = await demo_status()
+            html = get_demo_html(status_data, config)
+            return HTMLResponse(content=html)
+        
+        log.info("Native demo UI mounted at /demo")
 
     return app
 

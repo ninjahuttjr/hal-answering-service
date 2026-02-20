@@ -409,8 +409,6 @@ def main():
                         help="Start in demo mode (browser mic, no SignalWire needed)")
     parser.add_argument("--host", type=str, default=None,
                         help="Bind address (default: 0.0.0.0 for --demo, else from HOST env)")
-    parser.add_argument("--share", action="store_true",
-                        help="Create a public HTTPS URL for the demo (enables mic on any device)")
     args = parser.parse_args()
 
     # Load .env early so auto-detection can check SignalWire creds
@@ -539,47 +537,13 @@ def main():
     if is_demo:
         log.info("=" * 55)
         log.info("  DEMO READY: http://localhost:%d/demo", config.port)
-        log.info("  (Use localhost — LAN IPs block mic access)")
+        log.info("  (Use localhost for mic access)")
         log.info("=" * 55)
-        if config.host == "0.0.0.0" and not args.share:
-            log.info("Tip: --share creates a public HTTPS URL (mic works everywhere)")
+        if config.host == "0.0.0.0":
+            log.info("Tip: for remote access on your phone, use ngrok or cloudflared:")
+            log.info("     ngrok http %d", config.port)
     else:
         log.info("Ready in %.1fs — listening on %s:%d", total, config.host, config.port)
-
-    # Start share tunnel if requested (creates a public HTTPS URL via Gradio)
-    share_url = None
-    if is_demo and args.share:
-        try:
-            from gradio import networking
-            import inspect
-
-            share_token = ""
-            share_server_address = getattr(networking, "GRADIO_SHARE_SERVER_ADDRESS", None)
-
-            # Build kwargs based on what this version of setup_tunnel accepts
-            sig = inspect.signature(networking.setup_tunnel)
-            tunnel_kwargs = {
-                "local_host": "127.0.0.1",
-                "local_port": config.port,
-                "share_token": share_token,
-                "share_server_address": share_server_address,
-            }
-            # Gradio 6.x added share_server_tls_certificate
-            if "share_server_tls_certificate" in sig.parameters:
-                tunnel_kwargs["share_server_tls_certificate"] = None
-
-            result = networking.setup_tunnel(**tunnel_kwargs)
-            # Gradio 6.x returns a string; older versions return (url, _)
-            share_url = result if isinstance(result, str) else result[0]
-        except Exception as e:
-            log.warning("Could not create share tunnel: %s", e)
-            log.info("Tip: install gradio to enable --share, or use ngrok/cloudflared manually")
-
-        if share_url:
-            log.info("=" * 60)
-            log.info("  PUBLIC DEMO URL (HTTPS): %s/demo", share_url)
-            log.info("  Mic works on any device via this URL.")
-            log.info("=" * 60)
 
     uvicorn.run(app, host=config.host, port=config.port, log_level="warning",
                 ws_max_size=65536)
