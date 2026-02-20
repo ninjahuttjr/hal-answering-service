@@ -228,18 +228,14 @@ def _demo_interactive_setup():
     llm_url = os.environ.get("LLM_BASE_URL", "").strip()
     llm_key = os.environ.get("LLM_API_KEY", "").strip()
     llm_model = os.environ.get("LLM_MODEL", "").strip()
-    tts_model_dir = os.environ.get("TTS_MODEL_DIR", "").strip()
     owner = os.environ.get("OWNER_NAME", "").strip()
-    hf_token = os.environ.get("HF_TOKEN", "").strip()
 
     needs_setup = not has_dotenv or not llm_url or not owner
     if not needs_setup:
         return  # Already configured
 
-    if has_dotenv:
-        print("\n  Demo setup is incomplete. Let's fill in missing values.\n")
-    else:
-        print("\n  No .env file found. Let's set up demo mode.\n")
+    print()
+    print("  First-time setup — just a few questions.\n")
 
     def _ask(prompt: str, default: str) -> str:
         display = f"  {prompt} [{default}]: " if default else f"  {prompt}: "
@@ -289,16 +285,22 @@ def _demo_interactive_setup():
     llm_model = _ask(model_prompt, default_model)
     owner_name = _ask("Your name (for greetings)", owner or "Dave")
 
+    # Auto-detect bundled TTS model dir (no prompt needed)
+    tts_model_dir = os.environ.get("TTS_MODEL_DIR", "").strip()
     bundled_default = os.path.join(os.path.dirname(__file__) or ".", "models", "chatterbox")
     if not tts_model_dir and os.path.isdir(bundled_default):
         tts_model_dir = bundled_default
-    tts_model_dir = _ask("Bundled TTS model dir (optional)", tts_model_dir)
 
-    hf_token = _ask("Hugging Face token (optional; helps first-run model download)", hf_token)
+    # Auto-detect HAL voice prompt (ship hal9000.wav as default)
+    tts_voice = os.environ.get("TTS_VOICE_PROMPT", "").strip()
+    if not tts_voice:
+        hal_wav = os.path.join(os.path.dirname(__file__) or ".", "hal9000.wav")
+        if os.path.isfile(hal_wav):
+            tts_voice = "hal9000.wav"
 
     # Write minimal .env
     lines = [
-        "# HAL Answering Service — demo config (auto-generated)",
+        "# HAL Answering Service — config (auto-generated)",
         "HOST=127.0.0.1",
         "PORT=8080",
         "",
@@ -311,10 +313,10 @@ def _demo_interactive_setup():
     ]
     if tts_model_dir:
         lines.append(f"TTS_MODEL_DIR={tts_model_dir}")
+    if tts_voice:
+        lines.append(f"TTS_VOICE_PROMPT={tts_voice}")
     if llm_model:
         lines.append(f"LLM_MODEL={llm_model}")
-    if hf_token:
-        lines.append(f"HF_TOKEN={hf_token}")
     lines.append(f"OWNER_NAME={owner_name}")
     lines.append("")  # trailing newline
 
@@ -329,10 +331,10 @@ def _demo_interactive_setup():
     os.environ["LLM_API_KEY"] = llm_key
     if tts_model_dir:
         os.environ["TTS_MODEL_DIR"] = tts_model_dir
+    if tts_voice:
+        os.environ["TTS_VOICE_PROMPT"] = tts_voice
     if llm_model:
         os.environ["LLM_MODEL"] = llm_model
-    if hf_token:
-        os.environ["HF_TOKEN"] = hf_token
     os.environ["OWNER_NAME"] = owner_name
     # Stash demo owner name so it takes priority over .env OWNER_NAME
     os.environ["_DEMO_OWNER_NAME"] = owner_name
@@ -425,8 +427,8 @@ def main():
         log.info("No SignalWire credentials found — starting in demo mode automatically")
 
     if is_demo:
-        _demo_interactive_setup()
         _preflight_demo()
+        _demo_interactive_setup()
     else:
         _preflight()
 
@@ -549,25 +551,26 @@ def main():
     if is_demo and args.share:
         try:
             from gradio import networking
-            share_token = ""
-            # Gradio's setup_tunnel expects (local_host, local_port, share_token, share_server_address)
-            # Use Gradio's defaults for the share server
-            share_server_address = None
-            try:
-                from gradio.networking import GRADIO_SHARE_SERVER_ADDRESS
-                share_server_address = GRADIO_SHARE_SERVER_ADDRESS
-            except ImportError:
-                share_server_address = None
+            import inspect
 
-            if share_server_address:
-                share_url, _ = networking.setup_tunnel(
-                    "127.0.0.1", config.port, share_token, share_server_address
-                )
-            else:
-                # Gradio >= 4.x: try the simpler API
-                share_url, _ = networking.setup_tunnel(
-                    "127.0.0.1", config.port, share_token, None
-                )
+            share_token = ""
+            share_server_address = getattr(networking, "GRADIO_SHARE_SERVER_ADDRESS", None)
+
+            # Build kwargs based on what this version of setup_tunnel accepts
+            sig = inspect.signature(networking.setup_tunnel)
+            tunnel_kwargs = {
+                "local_host": "127.0.0.1",
+                "local_port": config.port,
+                "share_token": share_token,
+                "share_server_address": share_server_address,
+            }
+            # Gradio 6.x added share_server_tls_certificate
+            if "share_server_tls_certificate" in sig.parameters:
+                tunnel_kwargs["share_server_tls_certificate"] = None
+
+            result = networking.setup_tunnel(**tunnel_kwargs)
+            # Gradio 6.x returns a string; older versions return (url, _)
+            share_url = result if isinstance(result, str) else result[0]
         except Exception as e:
             log.warning("Could not create share tunnel: %s", e)
             log.info("Tip: install gradio to enable --share, or use ngrok/cloudflared manually")

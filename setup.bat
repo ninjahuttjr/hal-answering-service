@@ -127,7 +127,5 @@ if errorlevel 1 (
 :: ── Done ────────────────────────────────────────────────
 echo.
 echo [+] Setup complete! Next steps:
-echo   1. copy .env.example .env     (configure your settings)
-echo   2. Start your LLM server      (e.g. LM Studio)
-echo   3. python main.py             (start HAL)
-echo   4. Calls will be recorded in recordings/ with metadata in metadata/
+echo   1. Start your LLM server      (e.g. LM Studio or Ollama)
+echo   2. python main.py             (HAL will walk you through the rest)

@@ -176,9 +176,5 @@ print('  All project imports OK')
 # ── Done ────────────────────────────────────────────────
 echo ""
 info "Setup complete! Next steps:"
-echo "  1. cp .env.example .env    # configure your settings"
-echo "  2. (Optional) prebundle TTS weights for offline onboarding:"
-echo "     python scripts/prefetch_chatterbox.py --output models/chatterbox"
-echo "  3. Start your LLM server   # e.g. LM Studio/Ollama"
-echo "  4. python main.py          # start HAL"
-echo "  5. Calls recorded in recordings/ with metadata in metadata/"
+echo "  1. Start your LLM server   # e.g. LM Studio or Ollama"
+echo "  2. python main.py          # HAL will walk you through the rest"

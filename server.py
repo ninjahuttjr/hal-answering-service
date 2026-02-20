@@ -1208,14 +1208,8 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
                         return payload
                 return await demo_config_update(_Payload())
 
-            gradio_demo = create_gradio_app(
-                config=config,
-                status_checker=_gradio_status_checker,
-                config_writer=_gradio_config_writer,
-            )
             from gradio_ui import HAL_CSS, HAL_JS
-            # Gradio 6.x mount_gradio_app stores js= in gradio_config but
-            # never executes it. Use head= to inject a self-executing script.
+            # Inject CSS and JS via gr.Blocks constructor (works on Gradio 5.x and 6.x).
             # We poll for the HAL eye element (rendered by gr.HTML via Svelte)
             # before initializing, since DOMContentLoaded fires too early.
             hal_head = (
@@ -1229,12 +1223,14 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
                 "})();"
                 "</script>"
             )
-            app = gr.mount_gradio_app(
-                app, gradio_demo, path="/demo",
+            gradio_demo = create_gradio_app(
+                config=config,
+                status_checker=_gradio_status_checker,
+                config_writer=_gradio_config_writer,
                 css=HAL_CSS,
                 head=hal_head,
-                footer_links=[],
             )
+            app = gr.mount_gradio_app(app, gradio_demo, path="/demo")
             log.info("Gradio demo UI mounted at /demo")
         except ImportError:
             log.error("Gradio not installed — install with: pip install 'gradio>=5.0.0'")

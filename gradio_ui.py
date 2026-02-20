@@ -980,6 +980,8 @@ def create_gradio_app(
     status_checker=None,
     config_reader=None,
     config_writer=None,
+    css: str | None = None,
+    head: str | None = None,
 ):
     """Create the Gradio demo UI.
 
@@ -988,9 +990,11 @@ def create_gradio_app(
         status_checker: Async callable that returns the status dict (same as /demo/status).
         config_reader: Async callable that returns the config dict (same as GET /demo/config).
         config_writer: Async callable(payload) that applies/saves config (same as POST /demo/config).
+        css: Custom CSS to inject into the page.
+        head: Custom HTML to inject into the page <head>.
     """
 
-    with gr.Blocks(title="HAL Answering Service") as demo:
+    with gr.Blocks(title="HAL Answering Service", css=css, head=head) as demo:
 
         # ── Full page HTML: eye, status, transcript — all in one component ──
         gr.HTML(FULL_PAGE_HTML)

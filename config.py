@@ -33,6 +33,12 @@ def _env_float(key: str, default: float = 0.0) -> float:
         return default
 
 
+def _default_voice_prompt() -> str:
+    """Return path to hal9000.wav if it exists next to this file, else empty."""
+    candidate = os.path.join(os.path.dirname(__file__) or ".", "hal9000.wav")
+    return candidate if os.path.isfile(candidate) else ""
+
+
 def _env_bool(key: str, default: bool = False) -> bool:
     raw = os.environ.get(key, "").strip().lower()
     if not raw:
@@ -89,8 +95,8 @@ class Config:
     # Optional local directory containing pre-downloaded Chatterbox weights.
     # If set and valid, startup uses this directory and skips HF downloads.
     tts_model_dir: str = field(default_factory=lambda: _env("TTS_MODEL_DIR", ""))
-    # Path to a WAV file (>5s) for voice cloning, or empty for default voice
-    tts_voice_prompt: str = field(default_factory=lambda: _env("TTS_VOICE_PROMPT", ""))
+    # Path to a WAV file (>5s) for voice cloning. Defaults to hal9000.wav if present.
+    tts_voice_prompt: str = field(default_factory=lambda: _env("TTS_VOICE_PROMPT", "") or _default_voice_prompt())
 
     # VAD (Silero)
     vad_silence_threshold_ms: int = field(default_factory=lambda: _env_int("VAD_SILENCE_THRESHOLD_MS", 400))
