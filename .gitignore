@@ -47,3 +47,4 @@ make_demo_video.py
 test_scripts/
 glm-4.7-flash-nothink.jinja
 nul
+server.pid
