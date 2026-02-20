@@ -403,12 +403,63 @@ def _has_signalwire_creds() -> bool:
     return True
 
 
+def _resolve_ssl(config, args) -> tuple:
+    """Return (certfile, keyfile, hostname) or (None, None, None).
+
+    Priority order:
+      1. --ssl-cert / --ssl-key CLI args
+      2. SSL_CERTFILE / SSL_KEYFILE env vars
+      3. Auto-generated Tailscale cert (if `tailscale cert` is available)
+    """
+    import shutil
+    import subprocess
+
+    # 1. Explicit CLI / env
+    certfile = getattr(args, "ssl_cert", None) or os.environ.get("SSL_CERTFILE", "").strip()
+    keyfile = getattr(args, "ssl_key", None) or os.environ.get("SSL_KEYFILE", "").strip()
+    if certfile and keyfile and os.path.isfile(certfile) and os.path.isfile(keyfile):
+        return certfile, keyfile, None
+
+    # 2. Auto Tailscale
+    if shutil.which("tailscale"):
+        try:
+            result = subprocess.run(
+                ["tailscale", "status", "--json"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                import json
+                ts = json.loads(result.stdout)
+                dns_name = ts.get("Self", {}).get("DNSName", "").rstrip(".")
+                if dns_name:
+                    base = os.path.dirname(__file__) or "."
+                    ts_cert = os.path.join(base, "tailscale.crt")
+                    ts_key = os.path.join(base, "tailscale.key")
+                    gen = subprocess.run(
+                        ["tailscale", "cert",
+                         "--cert-file", ts_cert, "--key-file", ts_key,
+                         dns_name],
+                        capture_output=True, text=True, timeout=15
+                    )
+                    if gen.returncode == 0 and os.path.isfile(ts_cert):
+                        log.info("Tailscale HTTPS cert for %s", dns_name)
+                        return ts_cert, ts_key, dns_name
+        except Exception as e:
+            log.debug("Tailscale cert auto-detection failed: %s", e)
+
+    return None, None, None
+
+
 def main():
     parser = argparse.ArgumentParser(description="HAL Answering Service")
     parser.add_argument("--demo", action="store_true",
                         help="Start in demo mode (browser mic, no SignalWire needed)")
     parser.add_argument("--host", type=str, default=None,
                         help="Bind address (default: 0.0.0.0 for --demo, else from HOST env)")
+    parser.add_argument("--ssl-cert", type=str, default=None,
+                        help="Path to SSL certificate file (also: SSL_CERTFILE env)")
+    parser.add_argument("--ssl-key", type=str, default=None,
+                        help="Path to SSL private key file (also: SSL_KEYFILE env)")
     args = parser.parse_args()
 
     # Load .env early so auto-detection can check SignalWire creds
@@ -533,20 +584,34 @@ def main():
 
     app = create_app(config, stt, tts, vad_model, greeting_cache, silence_prompt_cache)
 
+    # ── Resolve SSL cert/key ──
+    ssl_certfile, ssl_keyfile, ssl_hostname = _resolve_ssl(config, args)
+    use_tls = bool(ssl_certfile and ssl_keyfile)
+    scheme = "https" if use_tls else "http"
+
     total = time.perf_counter() - t_start
     if is_demo:
         log.info("=" * 55)
-        log.info("  DEMO READY: http://localhost:%d/demo", config.port)
-        log.info("  (Use localhost for mic access)")
+        if use_tls:
+            host_display = ssl_hostname or "<your-hostname>"
+            log.info("  DEMO READY: %s://%s:%d/demo", scheme, host_display, config.port)
+        else:
+            log.info("  DEMO READY: http://localhost:%d/demo", config.port)
+            log.info("  (Use localhost for mic access)")
         log.info("=" * 55)
-        if config.host == "0.0.0.0":
+        if config.host == "0.0.0.0" and not use_tls:
             log.info("Tip: for remote access on your phone, use ngrok or cloudflared:")
             log.info("     ngrok http %d", config.port)
     else:
-        log.info("Ready in %.1fs — listening on %s:%d", total, config.host, config.port)
+        log.info("Ready in %.1fs — listening on %s://%s:%d", total, scheme, config.host, config.port)
+
+    ssl_kwargs = {}
+    if use_tls:
+        ssl_kwargs = {"ssl_certfile": ssl_certfile, "ssl_keyfile": ssl_keyfile}
+        log.info("TLS enabled (%s)", ssl_certfile)
 
     uvicorn.run(app, host=config.host, port=config.port, log_level="warning",
-                ws_max_size=65536)
+                ws_max_size=65536, **ssl_kwargs)
 
 
 if __name__ == "__main__":

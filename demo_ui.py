@@ -757,8 +757,8 @@ details[open] summary {{ border-bottom: 1px solid var(--h-border-subtle); }}
       this.setStatus("Requesting microphone access...", "warn");
 
       // Browsers kill navigator.mediaDevices on non-localhost HTTP.
-      // Auto-redirect to localhost if on LAN IP.
-      if (!navigator.mediaDevices) {{
+      // Auto-redirect to localhost if on LAN IP (but NOT if already on HTTPS).
+      if (!navigator.mediaDevices && location.protocol !== "https:") {{
         const port = location.port || "8080";
         const localhostUrl = "http://localhost:" + port + location.pathname;
         this.setStatus("Redirecting to localhost for mic access...", "warn");
