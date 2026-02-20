@@ -178,3 +178,4 @@ echo ""
 info "Setup complete! Next steps:"
 echo "  1. Start your LLM server   # e.g. LM Studio or Ollama"
 echo "  2. python main.py          # HAL will walk you through the rest"
+

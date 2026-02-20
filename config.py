@@ -172,3 +172,4 @@ class Config:
 
         if errors:
             raise ValueError("Configuration errors:\n  " + "\n  ".join(errors))
+

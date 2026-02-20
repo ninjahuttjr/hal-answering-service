@@ -108,3 +108,4 @@ class SpeechToText:
             else:
                 log.info("STT: %s", result)
         return result
+
