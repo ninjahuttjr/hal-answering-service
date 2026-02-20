@@ -107,12 +107,14 @@ class SileroVAD:
         self._silence_chunks = max(1, silence_threshold_ms // 32)
         self._min_speech_chunks = max(1, min_speech_ms // 32)
 
-        # Use pre-loaded model (cloned for per-call isolation)
+        # Deep-copy the JIT model for per-call state isolation. Silero VAD stores
+        # LSTM hidden states internally, so concurrent calls need separate copies.
+        # The model is ~2MB — acceptable for MAX_CONCURRENT_CALLS (default 3).
         import copy
         self._model = copy.deepcopy(model)
         self._model.reset_states()
-        log.info("SileroVAD instance created (threshold=%.2f, silence=%dms, min_speech=%dms)",
-                 speech_threshold, silence_threshold_ms, min_speech_ms)
+        log.debug("SileroVAD instance created (threshold=%.2f, silence=%dms, min_speech=%dms)",
+                  speech_threshold, silence_threshold_ms, min_speech_ms)
 
         # State
         self._pending = np.array([], dtype=np.float32)  # Buffer for incomplete chunks

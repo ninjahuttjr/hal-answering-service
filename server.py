@@ -1,5 +1,7 @@
 """FastAPI server with SignalWire webhook and WebSocket media stream endpoints."""
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import binascii
@@ -14,6 +16,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -301,9 +304,9 @@ def _persist_call_metadata(
         log.error("Failed to persist call metadata: %s", e)
 
 
-def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
-               greeting_cache: dict | None = None,
-               silence_prompt_cache: list | None = None) -> FastAPI:
+def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model: Any,
+               greeting_cache: dict[str, dict[str, str | bytes]] | None = None,
+               silence_prompt_cache: list[dict[str, str | bytes]] | None = None) -> FastAPI:
     """Create and configure the FastAPI application."""
     app = FastAPI(title="HAL Answering Service", docs_url=None, redoc_url=None, openapi_url=None)
     recordings_dir = Path(config.recordings_dir)
@@ -335,6 +338,13 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
     def _check_rate_limit(client_ip: str) -> bool:
         """Return True if the request is within rate limits, False to reject."""
         now = time.monotonic()
+
+        # Periodically prune stale IPs with empty deques (every ~50 calls)
+        if len(_webhook_hits) > 10 and hash(client_ip) % 50 == 0:
+            stale_ips = [ip for ip, dq in _webhook_hits.items()
+                         if not dq or now - dq[-1] > WEBHOOK_RATE_WINDOW_S]
+            for ip in stale_ips:
+                _webhook_hits.pop(ip, None)
 
         # Prune tracked IPs if over capacity (evict oldest)
         if client_ip not in _webhook_hits and len(_webhook_hits) >= WEBHOOK_RATE_MAX_IPS:
@@ -633,8 +643,11 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
             log.error("WebSocket error: %s", type(e).__name__)
             await _finalize_call()
         finally:
-            await _cancel_task(duration_task)
-            await _cancel_task(start_timeout_task)
+            try:
+                await _cancel_task(duration_task)
+                await _cancel_task(start_timeout_task)
+            except Exception:
+                pass  # Ensure cleanup completes
 
     # ── Demo mode endpoints ──
 
@@ -1187,8 +1200,11 @@ def create_app(config: Config, stt: SpeechToText, tts: TTS, vad_model,
             log.error("Demo WebSocket error: %s", type(e).__name__)
             await _finalize_demo()
         finally:
-            await _cancel_task(duration_task)
-            await _cancel_task(hangup_task)
+            try:
+                await _cancel_task(duration_task)
+                await _cancel_task(hangup_task)
+            except Exception:
+                pass  # Ensure session counter always decrements
             _demo_session_count = max(0, _demo_session_count - 1)
 
     # ── Native HTML demo UI ──

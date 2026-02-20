@@ -4,6 +4,7 @@ import re
 import logging
 from typing import Generator
 
+import httpx
 from openai import OpenAI
 
 from config import Config
@@ -17,6 +18,9 @@ SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
 MAX_HISTORY_MESSAGES = 100  # 50 turns (user + assistant) — scammer calls need long context
 MAX_SENTENCES_PER_RESPONSE = 6  # Phone calls: 1-2 normal, 6 is generous safety cap
 SUPPORTED_LLM_PROVIDERS = {"auto", "lmstudio", "ollama", "openai_compatible"}
+
+# Timeout for LLM requests — prevents indefinite hangs if LLM server is unresponsive
+LLM_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
 
 # GLM-4 special tokens and other garbage that can leak from LLMs
 _GARBAGE_RE = re.compile(
@@ -107,6 +111,7 @@ class LLMClient:
         self.client = OpenAI(
             base_url=self._client_base_url,
             api_key=self._client_api_key,
+            timeout=LLM_TIMEOUT,
         )
         self.history: list[dict] = []
         log.info("LLM provider: %s (base_url=%s)", self.provider, config.llm_base_url)
@@ -123,9 +128,11 @@ class LLMClient:
         with the caller when the caller says things like 'I am Dave').
         """
         self.history.append({"role": "user", "content": f"Caller: {text}"})
-        # Trim to max history
+        # Trim to max history — drop oldest messages to stay within context limits
         if len(self.history) > MAX_HISTORY_MESSAGES:
+            dropped = len(self.history) - MAX_HISTORY_MESSAGES
             self.history = self.history[-MAX_HISTORY_MESSAGES:]
+            log.info("History trimmed: dropped %d oldest messages (%d remaining)", dropped, len(self.history))
 
     def _build_messages(self) -> list[dict]:
         """Build the full message list with system prompt."""
@@ -140,7 +147,7 @@ class LLMClient:
             return
         self._client_base_url = desired_url
         self._client_api_key = desired_key
-        self.client = OpenAI(base_url=desired_url, api_key=desired_key)
+        self.client = OpenAI(base_url=desired_url, api_key=desired_key, timeout=LLM_TIMEOUT)
         requested = _normalize_provider(self.config.llm_provider)
         self.provider = _infer_provider(desired_url) if requested == "auto" else requested
         log.info("LLM client reloaded (provider=%s, base_url=%s)", self.provider, desired_url)

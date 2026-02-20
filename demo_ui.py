@@ -521,7 +521,7 @@ details[open] summary {{ border-bottom: 1px solid var(--h-border-subtle); }}
   <details>
     <summary>Settings</summary>
     <div style="padding: 12px 16px; font-size: 0.74rem; color: var(--h-text-dim);">
-      To modify the server configuration without Gradio, please edit the <code>.env</code> file directly in the application's root directory and restart the server.
+      To modify the server configuration, edit the <code>.env</code> file in the application's root directory and restart the server.
     </div>
   </details>
 </div>

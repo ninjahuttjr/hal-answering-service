@@ -9,6 +9,7 @@ import threading
 import time
 import wave
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Awaitable
 
 import numpy as np
@@ -58,8 +59,8 @@ class CallHandler:
         call_sid: str,
         stream_sid: str,
         caller_number: str,
-        greeting_cache: dict | None = None,
-        silence_prompt_cache: list | None = None,
+        greeting_cache: dict[str, dict[str, str | bytes]] | None = None,
+        silence_prompt_cache: list[dict[str, str | bytes]] | None = None,
         on_transcript: Callable[[str, str], Awaitable[None]] | None = None,
     ):
         self.config = config
@@ -173,7 +174,8 @@ class CallHandler:
         self.transcript.append({"role": "agent", "text": greeting})
         if self._on_transcript:
             await self._on_transcript("agent", greeting)
-        self.llm.history.append({"role": "assistant", "content": greeting})
+        async with self._state_lock:
+            self.llm.history.append({"role": "assistant", "content": greeting})
         self.speaking = False
 
         # Start silence timer
@@ -288,7 +290,10 @@ class CallHandler:
             log.error("[%s] Pipeline error: %s: %s", self.call_sid, type(e).__name__, e)
         finally:
             self._processing = False
-            self.vad.reset()
+            try:
+                self.vad.reset()
+            except Exception as e:
+                log.error("[%s] VAD reset failed: %s", self.call_sid, e)
 
     async def _process_utterance(self):
         """Run the full STT -> LLM -> TTS pipeline for one caller utterance."""
@@ -316,7 +321,8 @@ class CallHandler:
             log.debug("[%s] STT returned empty text for %.2fs audio, skipping", self.call_sid, duration_s)
             return
 
-        # Cap transcribed text length to limit prompt injection surface
+        # Sanitize text to limit prompt injection surface
+        text = text.replace('\n', ' ').replace('\r', ' ')
         if len(text) > 500:
             text = text[:500]
             log.warning("[%s] STT text truncated to 500 chars", self.call_sid)
@@ -325,11 +331,9 @@ class CallHandler:
         if self._on_transcript:
             await self._on_transcript("caller", text)
 
-        # Add user message to LLM history (caller is responsible now)
-        self.llm.add_user_message(text)
-
-        # Reset sentence tracking for this pipeline run (under lock)
+        # Add user message + reset sentence tracking (under lock)
         async with self._state_lock:
+            self.llm.add_user_message(text)
             self._sentences_spoken = []
             self._history_finalized = False
 
@@ -510,6 +514,7 @@ class CallHandler:
         """Handle caller barge-in: stop pipeline, flush audio, seed VAD."""
         log.debug("[%s] Handling barge-in", self.call_sid)
         self._silence_prompt_count = 0
+        self._silence_prompt_index = 0
 
         # 1. Signal pipeline to stop
         self._llm_cancel.set()
@@ -523,7 +528,7 @@ class CallHandler:
             await self._send_clear()
 
         # 4. Trim outbound recording — remove audio that was flushed (never heard)
-        barge_sample = int((time.perf_counter() - self._rec_wall_start) * SAMPLE_RATE_8K)
+        barge_sample = max(0, int((time.perf_counter() - self._rec_wall_start) * SAMPLE_RATE_8K))
         async with self._state_lock:
             trimmed = []
             for offset, data in self._rec_outbound:
@@ -532,7 +537,9 @@ class CallHandler:
                     continue  # Queued but never played — discard entirely
                 if end > barge_sample:
                     # Partially played — keep only what was heard
-                    trimmed.append((offset, data[:barge_sample - offset]))
+                    keep = max(0, barge_sample - offset)
+                    if keep > 0:
+                        trimmed.append((offset, data[:keep]))
                 else:
                     trimmed.append((offset, data))
             self._rec_outbound = trimmed
@@ -615,7 +622,7 @@ class CallHandler:
         # Play it
         self.speaking = True
         self._bot_speak_start_time = time.perf_counter()
-        self._barge_in_count = 0
+        self._barge_in_window.clear()
         self._barge_in_audio_buffer.clear()
 
         if self._send_audio and mulaw_bytes:
@@ -642,7 +649,8 @@ class CallHandler:
         self.transcript.append({"role": "agent", "text": prompt_text})
         if self._on_transcript:
             await self._on_transcript("agent", prompt_text)
-        self.llm.history.append({"role": "assistant", "content": prompt_text})
+        async with self._state_lock:
+            self.llm.history.append({"role": "assistant", "content": prompt_text})
 
         self.speaking = False
         self._bot_speak_start_time = 0.0
@@ -745,7 +753,9 @@ class CallHandler:
             filename = f"{timestamp}_{safe_number}_{safe_sid}.wav"
             filepath = os.path.join(rec_dir, filename)
             # Final safety check: ensure path is within recordings dir
-            if not os.path.realpath(filepath).startswith(os.path.realpath(rec_dir)):
+            try:
+                Path(filepath).resolve().relative_to(Path(rec_dir).resolve())
+            except ValueError:
                 log.error("[%s] Path traversal blocked: %s", self.call_sid, filepath)
                 return
 
