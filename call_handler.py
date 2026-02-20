@@ -1,7 +1,6 @@
 """Per-call pipeline: VAD -> STT -> LLM -> TTS -> audio out."""
 
 import asyncio
-import audioop
 import collections
 import logging
 import os
@@ -15,7 +14,7 @@ from typing import Callable, Awaitable
 import numpy as np
 
 from config import Config
-from audio import mulaw_decode, SileroVAD, SAMPLE_RATE_8K
+from audio import mulaw_decode, _ULAW_TO_LIN, SileroVAD, SAMPLE_RATE_8K
 from stt import SpeechToText
 from llm import LLMClient
 from tts import TTS
@@ -705,9 +704,12 @@ class CallHandler:
         try:
             # CALLER: continuous mu-law stream, decode to int32 for mixing headroom
             inbound_mulaw = b"".join(self._rec_inbound)
-            inbound_pcm = np.frombuffer(
-                audioop.ulaw2lin(inbound_mulaw, 2), dtype=np.int16
-            ).astype(np.int32)
+            
+            if inbound_mulaw:
+                caller_indices = np.frombuffer(inbound_mulaw, dtype=np.uint8)
+                inbound_pcm = _ULAW_TO_LIN[caller_indices].astype(np.int32)
+            else:
+                inbound_pcm = np.array([], dtype=np.int32)
 
             # Total duration — use wall clock, ensure all outbound fits
             wall_duration = time.perf_counter() - self._rec_wall_start
@@ -723,9 +725,8 @@ class CallHandler:
 
             # Add agent audio at estimated playback positions
             for sample_offset, mulaw_data in self._rec_outbound:
-                pcm = np.frombuffer(
-                    audioop.ulaw2lin(mulaw_data, 2), dtype=np.int16
-                ).astype(np.int32)
+                agent_indices = np.frombuffer(mulaw_data, dtype=np.uint8)
+                pcm = _ULAW_TO_LIN[agent_indices].astype(np.int32)
                 end = min(sample_offset + len(pcm), total_samples)
                 n = end - sample_offset
                 if n > 0 and sample_offset >= 0:

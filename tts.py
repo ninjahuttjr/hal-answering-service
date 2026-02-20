@@ -1,6 +1,5 @@
 """Chatterbox Turbo TTS wrapper — voice cloning and G.711 mu-law output for telephony."""
 
-import audioop
 import importlib.resources
 import logging
 import os
@@ -29,6 +28,8 @@ from chatterbox.tts_turbo import ChatterboxTurboTTS
 from chatterbox.models.s3tokenizer import S3_SR
 from chatterbox.models.s3gen import S3GEN_SR
 from chatterbox.models.t3.modules.cond_enc import T3Cond
+
+from audio import mulaw_encode
 
 log = logging.getLogger(__name__)
 
@@ -163,12 +164,6 @@ def _resample_linear(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndar
     return (audio[indices_floor] * (1.0 - frac) + audio[indices_ceil] * frac).astype(np.float32)
 
 
-def _pcm_to_mulaw(audio_float: np.ndarray) -> bytes:
-    """Convert float audio [-1, 1] to G.711 mu-law bytes."""
-    pcm16 = (np.clip(audio_float, -1.0, 1.0) * 32767).astype(np.int16)
-    return audioop.lin2ulaw(pcm16.tobytes(), 2)
-
-
 MAX_TTS_TEXT_LENGTH = 2000  # Characters — prevent OOM on extremely long text
 
 
@@ -269,7 +264,7 @@ class TTS:
             return b""
 
         audio_8k = _resample_linear(audio_24k, SAMPLE_RATE_CHATTERBOX, SAMPLE_RATE_8K)
-        return _pcm_to_mulaw(audio_8k)
+        return mulaw_encode(audio_8k)
 
     def synthesize_mulaw_streaming(self, text: str):
         """
