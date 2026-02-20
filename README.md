@@ -9,9 +9,9 @@ No cloud AI. No per-minute billing. Runs entirely on your hardware using a local
 ```mermaid
 graph TD
     classDef default fill:#1a1a1a,stroke:#333,stroke-width:1px,color:#d8c8c8;
-    classDef call fill:#2d1b1b,stroke:#bf1d1d,stroke-width:2px,color:#f0e0e0;
+    classDef callerNode fill:#2d1b1b,stroke:#bf1d1d,stroke-width:2px,color:#f0e0e0;
 
-    Caller([Incoming Call]):::call -- "Media Stream" --> WS
+    Caller([Incoming Call]):::callerNode -- "Media Stream" --> WS
 
     subgraph Server [Your Server GPU]
         direction TB
