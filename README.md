@@ -6,27 +6,29 @@ No cloud AI. No per-minute billing. Runs entirely on your hardware using a local
 
 ## How it works
 
-```
-                          Your server (GPU)
-                    +--------------------------+
-Incoming call       |                          |
-(SignalWire) ------>| WebSocket media stream   |
-                    |   |                      |
-                    |   v                      |
-                    | Silero VAD               |
-                    |   | (speech detected)    |
-                    |   v                      |
-                    | Faster-Whisper STT       |
-                    |   | (text)               |
-                    |   v                      |
-                    | Local LLM (LM Studio / Ollama) |
-                    |   | (response text)      |
-                    |   v                      |
-                    | Chatterbox TTS           |
-                    |   | (audio)              |
-Audio to caller <---|---+                      |
-                    |                          |
-                    +--------------------------+
+```mermaid
+graph TD
+    classDef default fill:#1a1a1a,stroke:#333,stroke-width:1px,color:#d8c8c8;
+    classDef call fill:#2d1b1b,stroke:#bf1d1d,stroke-width:2px,color:#f0e0e0;
+
+    Caller([Incoming Call]):::call -- "Media Stream" --> WS
+
+    subgraph Server [Your Server GPU]
+        direction TB
+        WS[WebSocket Media Stream]
+        VAD[Silero VAD]
+        STT["Faster-Whisper STT (Speech to Text)"]
+        LLM["Local LLM (LM Studio / Ollama)"]
+        TTS["Chatterbox TTS (Text to Speech)"]
+
+        WS -->|"Audio In"| VAD
+        VAD -->|"Speech Detected"| STT
+        STT -->|"Text Transcript"| LLM
+        LLM -->|"Response Text"| TTS
+        TTS -->|"Audio Out"| WS
+    end
+
+    WS -- "Voice Response" --> Caller
 ```
 
 ## Features
