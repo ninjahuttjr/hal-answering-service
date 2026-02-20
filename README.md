@@ -31,27 +31,27 @@ Audio to caller <---|---+                      |
 
 ## Features
 
-- **Fully local** -- no cloud AI APIs, everything on your GPU
-- **Sub-second latency** -- best observed round-trip is **649ms**, fully local, with voice cloning
-- **Voice cloning** -- clone any voice from a 5-second WAV sample (Chatterbox Turbo)
-- **Barge-in** -- caller can interrupt the AI mid-sentence, audio clears instantly
-- **Call recording** -- saves mixed mono WAV of both parties, accurately aligned
-- **Push notifications** -- call summary + full transcript via ntfy
-- **Call metadata** -- JSON logs of every call with transcript and summary
-- **Pre-recorded greetings** -- instant pickup, no TTS delay
-- **Silence handling** -- prompts quiet callers, auto-hangs-up after repeated silence
-- **Security** -- webhook signature validation, input truncation, XML escaping, prompt injection hardening
-- **Customizable personality** -- HAL 9000 is just the default. Change the system prompt in `prompts.py` and swap the voice WAV file to create any character you want
+- **Fully local:** No cloud AI APIs, everything on your GPU.
+- **Sub-second latency:** Best observed round-trip is **649ms**, fully local, with voice cloning.
+- **Voice cloning:** Clone any voice from a 5-second WAV sample (Chatterbox Turbo).
+- **Barge-in:** Caller can interrupt the AI mid-sentence, audio clears instantly.
+- **Call recording:** Saves mixed mono WAV of both parties, accurately aligned.
+- **Push notifications:** Call summary + full transcript via ntfy.
+- **Call metadata:** JSON logs of every call with transcript and summary.
+- **Pre-recorded greetings:** Instant pickup, no TTS delay.
+- **Silence handling:** Prompts quiet callers, auto-hangs-up after repeated silence.
+- **Security:** Webhook signature validation, input truncation, XML escaping, prompt injection hardening.
+- **Customizable personality:** HAL 9000 is just the default. Change the system prompt in `prompts.py` and swap the voice WAV file to create any character you want.
 
 ## Example call
 
-HAL vs. a warranty scammer -- keeps him on the line with increasingly specific questions until Dave gives up:
+HAL vs. a warranty scammer — keeps him on the line with increasingly specific questions until Dave gives up:
 
 <video src="https://github.com/user-attachments/assets/7e27ed27-0f59-45ed-8797-0300f976b2f6" controls></video>
 
 ## Try it now (demo mode)
 
-Talk to HAL through your browser -- no phone number, no accounts, no public server needed. Just a local LLM.
+Talk to HAL through your browser — no phone number, no accounts, no public server needed.
 
 ```bash
 git clone https://github.com/ninjahuttjr/hal-answering-service.git
@@ -60,21 +60,22 @@ setup.bat               # Windows (or ./setup.sh on Linux/macOS)
 python main.py --demo
 ```
 
-On first run it will walk you through provider setup (`LM Studio`, `Ollama`, or another OpenAI-compatible server), then write a demo `.env`. After startup, open **http://localhost:8080/demo**. The demo UI includes readiness checks, a live config editor, and a real-time transcript display.
+On first run it will walk you through provider setup (`LM Studio`, `Ollama`, or another OpenAI-compatible server), then write a demo `.env`. After startup, open **http://localhost:8080/demo** to access the native FastAPI UI. The demo UI includes a live status check, interactive microphone controls, and real-time transcripts.
 
-You need a local LLM server running before you start. Everything else -- speech-to-text, text-to-speech, voice activity detection -- runs locally with no cloud AI API.
+You need a local LLM server running before you start. Everything else — speech-to-text, text-to-speech, voice activity detection — runs locally with no cloud AI API.
 
-> **Mic access:** Browsers require either `localhost` or HTTPS for microphone access. The demo auto-redirects LAN IPs to localhost. For remote access, use `--share` to create a public HTTPS tunnel.
-
+> **Mic access:** Browsers require either `localhost` or HTTPS for microphone access. The demo auto-redirects LAN IPs to localhost. 
 > **Tip:** Use headphones to avoid echo feedback.
 
-### Remote access with `--share`
+### Remote device testing
+
+To test the demo on your phone or tablet, you need a public HTTPS tunnel. We recommend using `ngrok` or `cloudflared` to expose the UI securely:
 
 ```bash
-python main.py --demo --share
+# In a new terminal tab:
+ngrok http 8080
 ```
-
-This creates a public HTTPS URL (via Gradio's tunnel) so you can test from any device -- phone, tablet, another computer. Mic access works everywhere over HTTPS.
+Visit the `https` link provided by `ngrok` on your remote device.
 
 ## Requirements
 
@@ -83,9 +84,9 @@ This creates a public HTTPS URL (via Gradio's tunnel) so you can test from any d
 | **Python** | 3.12+ |
 | **GPU** | Optional: NVIDIA CUDA recommended for best latency. CPU mode is supported (including macOS). |
 | **VRAM** | 16 GB+ recommended for full GPU stack (Whisper large-v3-turbo + Chatterbox Turbo + Silero VAD ~ 6 GB, plus your LLM) |
-| **SignalWire** | Account with a phone number ([signalwire.com](https://signalwire.com)) -- $0.50/mo for a number, ~$0.007/min for inbound calls. **Not needed for demo mode.** |
+| **SignalWire** | Account with a phone number ([signalwire.com](https://signalwire.com)) — $0.50/mo for a number, ~$0.007/min for inbound calls. **Not needed for demo mode.** |
 | **Local LLM** | [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com), or any OpenAI-compatible API server |
-| **Public endpoint** | HTTPS -- via Tailscale Funnel, Cloudflare Tunnel, ngrok, etc. **Not needed for demo mode.** |
+| **Public endpoint** | HTTPS — via Tailscale Funnel, Cloudflare Tunnel, ngrok, etc. **Not needed for demo mode.** |
 
 ## Quick start
 
@@ -125,7 +126,7 @@ You also need a local LLM running:
 Run the setup script for your platform. It will:
 - Create a Python virtual environment
 - Auto-detect your NVIDIA GPU and install the right PyTorch build (CUDA or CPU)
-- Install `chatterbox-tts` with `--no-deps` (the PyPI package has [broken dependency pins](https://github.com/resemble-ai/chatterbox/issues) for Python 3.12+)
+- Install `chatterbox-tts` with `--no-deps` (the PyPI package has broken dependency pins)
 - Install all other dependencies
 - Verify that everything imports correctly
 
@@ -187,7 +188,7 @@ Copy the example config and fill in your values:
 **Windows:** `copy .env.example .env`
 **Linux / macOS:** `cp .env.example .env`
 
-Edit `.env` -- the required fields are:
+Edit `.env` — the required fields are:
 
 | Variable | What it is |
 |---|---|
@@ -202,8 +203,8 @@ Optional but recommended:
 
 | Variable | What it is |
 |---|---|
-| `HF_TOKEN` | Optional Hugging Face token -- useful if anonymous model download fails or is rate-limited ([get one here](https://huggingface.co/settings/tokens)) |
-| `TTS_MODEL_DIR` | Optional local directory with pre-downloaded Chatterbox weights (for fully offline onboarding) |
+| `HF_TOKEN` | Optional Hugging Face token — useful if anonymous model download fails or is rate-limited |
+| `TTS_MODEL_DIR` | Optional local directory with pre-downloaded weights (for offline onboarding) |
 | `TTS_DEVICE` | `auto`, `cuda`, or `cpu` (default is `auto`) |
 | `TTS_VOICE_PROMPT` | Path to a WAV file (>5s) for voice cloning |
 | `NTFY_TOPIC` | [ntfy.sh](https://ntfy.sh) topic for call notifications |
@@ -216,12 +217,7 @@ See `.env.example` for the full list of options with defaults.
 Choose one:
 
 - **LM Studio**: open [LM Studio](https://lmstudio.ai), load a model, and start the local server at `http://127.0.0.1:1234/v1`.
-- **Ollama**: run:
-  ```bash
-  ollama pull qwen3:4b
-  ollama serve
-  ```
-  then use `LLM_BASE_URL=http://127.0.0.1:11434/v1` and `LLM_PROVIDER=ollama`.
+- **Ollama**: run `ollama serve` and use `LLM_BASE_URL=http://127.0.0.1:11434/v1`.
 - **Other**: any OpenAI-compatible API endpoint is supported.
 
 Recommended models: anything fast with good instruction following. The default is `zai-org/glm-4.7-flash`.
@@ -236,12 +232,10 @@ python scripts/prefetch_chatterbox.py --output models/chatterbox
 ```
 
 Set one of:
-
 - `TTS_MODEL_DIR=models/chatterbox` in `.env`, or
 - leave `TTS_MODEL_DIR` unset and place files in `models/chatterbox` (auto-detected).
 
 Required files in the bundle directory:
-
 - `ve.safetensors`
 - `t3_turbo_v1.safetensors`
 - `s3gen_meanflow.safetensors`
@@ -269,12 +263,7 @@ Set `PUBLIC_HOST` in `.env` to the hostname you get (without `https://`).
 ### Configure SignalWire
 
 In the [SignalWire dashboard](https://signalwire.com), set your phone number's **incoming call webhook** to:
-
-```
-https://YOUR_PUBLIC_HOST/incoming-call
-```
-
-Make sure it's set to **POST** and the format is **XML**.
+`https://YOUR_PUBLIC_HOST/incoming-call` (Make sure it's set to **POST** and the format is **XML**).
 
 </details>
 
@@ -299,11 +288,9 @@ Two sample voices are included: `hal9000.wav` and `eugene.wav`.
 
 You probably don't want every call going to an AI. Here's how I use it:
 
-**Conditional forwarding (Verizon):** Dial `*71` followed by your SignalWire number. This only forwards calls you don't answer, so if you don't pick up it goes to HAL instead of voicemail. Other carriers have similar codes -- check your carrier's conditional forwarding instructions.
+**Conditional forwarding (Verizon):** Dial `*71` followed by your SignalWire number. This only forwards calls you don't answer, so if you don't pick up it goes to HAL instead of voicemail. Other carriers have similar codes.
 
 **Unknown callers only (iPhone):** Set up a Focus Mode that silences unknown numbers. Those calls go straight to HAL automatically while known contacts still ring through normally.
-
-These two together mean: known contacts ring your phone like normal, and if you don't answer they get HAL. Unknown numbers skip the ring entirely and go straight to HAL.
 
 </details>
 
@@ -318,19 +305,19 @@ Measured across 15 conversational exchanges over 3 live phone calls:
 
 | Stage | Best | Typical | Worst |
 |---|---|---|---|
-| STT (Faster-Whisper) | 63 ms | 200--300 ms | 424 ms |
-| LLM (time to first sentence) | 162 ms | 180--280 ms | 846 ms |
-| TTS (Chatterbox Turbo, first chunk) | 345 ms | 500--850 ms | 1560 ms |
-| **End-to-end** | **649 ms** | **~1.0--1.5 s** | **~2.8 s** |
+| STT (Faster-Whisper) | 63 ms | 200–300 ms | 424 ms |
+| LLM (time to first sentence) | 162 ms | 180–280 ms | 846 ms |
+| TTS (Chatterbox Turbo, first chunk) | 345 ms | 500–850 ms | 1560 ms |
+| **End-to-end** | **649 ms** | **~1.0–1.5 s** | **~2.8 s** |
 
-> **Note:** These times start from when the VAD detects the caller has stopped speaking (after the 400ms silence threshold). The "worst" numbers are from the first exchange of a call when caches are cold. After that first turn, it's consistently faster.
+> **Note:** These times start from when the VAD detects the caller has stopped speaking. The "worst" numbers are from the first exchange of a call when caches are cold.
 
 ### Why it feels fast
 
-- **Sentence-level streaming** -- The LLM streams its response and TTS synthesizes each sentence as it arrives. The caller hears the first sentence while the rest is still being generated in the background.
-- **Pre-recorded greetings** -- The initial pickup is instant. Greetings are synthesized at startup and played from memory, so there's zero TTS delay on the first thing the caller hears.
-- **Barge-in** -- If the caller interrupts, audio clears instantly and the pipeline restarts. No waiting for the AI to finish its thought.
-- **GPU concurrency** -- STT, LLM, and TTS all run on GPU. With enough VRAM, all three models stay loaded and hot.
+- **Sentence-level streaming:** The LLM streams its response and TTS synthesizes each sentence as it arrives.
+- **Pre-recorded greetings:** The initial pickup is instant. Greetings are synthesized at startup and played from memory.
+- **Barge-in:** If the caller interrupts, audio clears instantly and the pipeline restarts.
+- **GPU concurrency:** STT, LLM, and TTS all run concurrently on GPU.
 
 ### Hardware used for these benchmarks
 
@@ -348,10 +335,10 @@ Measured across 15 conversational exchanges over 3 live phone calls:
 
 | File | Purpose |
 |---|---|
-| `main.py` | Entry point -- loads models, pre-records greetings, starts server |
-| `server.py` | FastAPI app -- webhook, WebSocket media stream, demo endpoints, ntfy notifications |
-| `gradio_ui.py` | Gradio-based demo UI -- HAL eye, call controls, transcript, settings |
-| `call_handler.py` | Per-call pipeline -- VAD, STT, LLM, TTS, barge-in, recording |
+| `main.py` | Entry point — loads models, pre-records greetings, starts server |
+| `server.py` | FastAPI app — webhook, WebSocket media stream, demo endpoints, ntfy notifications |
+| `demo_ui.py` | Native FastAPI demo UI — HTML template for the HAL eye, Call status, and logs |
+| `call_handler.py` | Per-call pipeline — VAD, STT, LLM, TTS, barge-in, recording |
 | `audio.py` | G.711 mu-law codec, resampling, Silero VAD wrapper |
 | `stt.py` | Faster-Whisper speech-to-text |
 | `tts.py` | Chatterbox Turbo text-to-speech with voice cloning |
@@ -420,7 +407,7 @@ All settings are configured via environment variables (`.env` file).
 |---|---|
 | `ModuleNotFoundError: No module named 'chatterbox.tts_turbo'` | `chatterbox-tts` is too old. Run: `pip install --no-deps "chatterbox-tts>=0.1.5"` |
 | `Permission denied` under `venv/.../site-packages` | You likely ran setup with `sudo`. Fix with `sudo rm -rf venv` then rerun `./setup.sh` as your normal user. |
-| Demo mic doesn't work / no audio | Browsers require `localhost` or HTTPS for mic access. Use `http://localhost:8080/demo` (not a LAN IP). For remote access, use `python main.py --demo --share`. |
+| Demo mic doesn't work / no audio | Browsers require `localhost` or HTTPS for mic access. Use `http://localhost:8080/demo` (not a LAN IP). |
 | PyTorch CUDA not available after install | If you're on macOS/CPU this is expected: keep `STT_DEVICE=auto` and `TTS_DEVICE=auto`. If you're on NVIDIA, reinstall CUDA PyTorch: `pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124` |
 | Chatterbox model download fails without auth | Prefer shipping a local bundle (`TTS_MODEL_DIR` or `models/chatterbox`). Otherwise set `HF_TOKEN` in `.env` or run `hf auth login`, then restart. |
 | Slow responses in CPU mode | Set `STT_MODEL=base` and `STT_COMPUTE_TYPE=int8`, and use a smaller local LLM model. |
@@ -429,14 +416,14 @@ All settings are configured via environment variables (`.env` file).
 
 ## Acknowledgments
 
-- [Chatterbox TTS](https://github.com/resemble-ai/chatterbox) by Resemble AI -- voice cloning
-- [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper) -- CTranslate2 Whisper implementation
-- [Silero VAD](https://github.com/snakers4/silero-vad) -- voice activity detection
-- [Gradio](https://gradio.app) -- demo UI and HTTPS tunneling
-- [SignalWire](https://signalwire.com) -- telephony
-- [LM Studio](https://lmstudio.ai) -- local LLM server
-- [Ollama](https://ollama.com) -- local LLM runtime
-- [ntfy](https://ntfy.sh) -- push notifications
+- [Chatterbox TTS](https://github.com/resemble-ai/chatterbox) by Resemble AI — voice cloning
+- [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper) — CTranslate2 Whisper implementation
+- [Silero VAD](https://github.com/snakers4/silero-vad) — voice activity detection
+- [FastAPI](https://fastapi.tiangolo.com/) — web framework and WebSocket connections
+- [SignalWire](https://signalwire.com) — telephony
+- [LM Studio](https://lmstudio.ai) — local LLM server
+- [Ollama](https://ollama.com) — local LLM runtime
+- [ntfy](https://ntfy.sh) — push notifications
 
 ## License
 
