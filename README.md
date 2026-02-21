@@ -1,8 +1,8 @@
 # HAL Answering Service
 
-**A fully local AI phone screener.** Answers your calls as HAL 9000, collects the caller's name and reason, records the call, and sends you a push notification with a summary and full transcript.
+**A fully local AI phone screener.** Answers your calls as HAL 9000, screens callers, records conversations, and sends you a push notification with a summary and full transcript — all running on your own hardware.
 
-No cloud AI. No per-minute billing. Runs entirely on your hardware using a local LLM, local speech-to-text, and local text-to-speech with voice cloning.
+Zero cloud AI. Zero per-minute billing. Your GPU handles everything: local LLM for conversation, local speech-to-text, and local text-to-speech with voice cloning.
 
 ## How it works
 
@@ -44,6 +44,7 @@ graph TD
 - **Silence handling:** Prompts quiet callers, auto-hangs-up after repeated silence.
 - **Security:** Webhook signature validation, input truncation, XML escaping, prompt injection hardening.
 - **Customizable personality:** HAL 9000 is just the default. Change the system prompt in `prompts.py` and swap the voice WAV file to create any character you want.
+- **Graceful demo mode:** Runs in browser-mic demo mode until you're ready to connect a phone line — no separate setup needed.
 
 ## Demo
 
@@ -51,33 +52,42 @@ HAL vs. a vehicle warranty scammer — both sides are fully live LLM, nothing is
 
 <video src="https://github.com/user-attachments/assets/c27aabfe-299a-4a45-bbd8-843adfac2e37" controls></video>
 
-## Try it now (demo mode)
-
-Talk to HAL through your browser — no phone number, no accounts, no public server needed.
+## Quick start
 
 ```bash
 git clone https://github.com/ninjahuttjr/hal-answering-service.git
 cd hal-answering-service
-setup.bat               # Windows (or ./setup.sh on Linux/macOS)
-python main.py --demo
 ```
 
-On first run it will walk you through provider setup (`LM Studio`, `Ollama`, or another OpenAI-compatible server), then write a demo `.env`. After startup, open **http://localhost:8080/demo** to access the native FastAPI UI. The demo UI includes a live status check, interactive microphone controls, and real-time transcripts.
+**Windows:** `setup.bat` &nbsp;|&nbsp; **Linux/macOS:** `chmod +x setup.sh && ./setup.sh`
 
-You need a local LLM server running before you start. Everything else — speech-to-text, text-to-speech, voice activity detection — runs locally with no cloud AI API.
+```bash
+python main.py
+```
 
-> **Mic access:** Browsers require either `localhost` or HTTPS for microphone access. The demo auto-redirects LAN IPs to localhost. 
-> **Tip:** Use headphones to avoid echo feedback.
+That's it. On first run, HAL walks you through an interactive setup wizard that configures everything and writes a complete `.env` file. The wizard covers:
+
+1. **Your name** — used in greetings ("You've reached _name_'s phone")
+2. **LLM provider** — LM Studio, Ollama, or any OpenAI-compatible server
+3. **SignalWire** — phone line credentials (skip to stay in demo mode)
+4. **Public hostname** — for webhook delivery (skip for demo mode)
+5. **Server settings** — bind address, port, TLS
+
+If you skip SignalWire or the public hostname, HAL starts in **demo mode** automatically — talk to it through your browser at **http://localhost:8080/demo**. Fill in the missing fields in `.env` later and restart to go live. No re-setup needed.
+
+> **You need a local LLM server running before you start.** Everything else — speech-to-text, text-to-speech, voice activity detection — runs locally with no cloud API.
+
+> **Mic access:** Browsers require either `localhost` or HTTPS for microphone access. The demo auto-redirects LAN IPs to localhost. Use headphones to avoid echo feedback.
 
 ### Remote device testing
 
-To test the demo on your phone or tablet, you need a public HTTPS tunnel. We recommend using `ngrok` or `cloudflared` to expose the UI securely:
+To test the demo on your phone or tablet, expose the server with a tunnel:
 
 ```bash
-# In a new terminal tab:
-ngrok http 8080
+ngrok http 8080            # or: cloudflared tunnel --url http://localhost:8080
 ```
-Visit the `https` link provided by `ngrok` on your remote device.
+
+Visit the HTTPS URL on your device.
 
 ## Requirements
 
@@ -90,35 +100,45 @@ Visit the `https` link provided by `ngrok` on your remote device.
 | **Local LLM** | [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com), or any OpenAI-compatible API server |
 | **Public endpoint** | HTTPS — via Tailscale Funnel, Cloudflare Tunnel, ngrok, etc. **Not needed for demo mode.** |
 
-## Quick start
+## Going live (production)
 
-### Windows
+Once you're happy with HAL in demo mode, add the production fields to `.env` and restart:
 
-```powershell
-git clone https://github.com/ninjahuttjr/hal-answering-service.git
-cd hal-answering-service
-setup.bat                # auto-detects your GPU and installs everything
-copy .env.example .env   # then edit .env with your settings
-python main.py
+| Field | Where to get it |
+|---|---|
+| `SIGNALWIRE_PROJECT_ID` | [SignalWire dashboard](https://signalwire.com) → Project Settings |
+| `SIGNALWIRE_TOKEN` | SignalWire dashboard → API Tokens |
+| `SIGNALWIRE_SPACE` | Your SignalWire space name (the subdomain) |
+| `SIGNALWIRE_PHONE_NUMBER` | The number that receives calls (e.g. `+14155551234`) |
+| `PUBLIC_HOST` | Your public HTTPS hostname, no `https://` (e.g. `caller.example.com`) |
+| `OWNER_NAME` | Your name — used in greetings |
+
+Then in the [SignalWire dashboard](https://signalwire.com), set your phone number's **incoming call webhook** to:
+
+```
+https://YOUR_PUBLIC_HOST/incoming-call
 ```
 
-### Linux / macOS
+Make sure it's set to **POST** and the format is **XML**.
+
+### Exposing your server
+
+You need a public HTTPS endpoint forwarding to port 8080:
 
 ```bash
-git clone https://github.com/ninjahuttjr/hal-answering-service.git
-cd hal-answering-service
-chmod +x setup.sh
-./setup.sh               # auto-detects your GPU and installs everything
-cp .env.example .env     # then edit .env with your settings
-python main.py
+# Tailscale Funnel (easiest if you use Tailscale)
+tailscale funnel 8080
+
+# Cloudflare Tunnel
+cloudflared tunnel --url http://localhost:8080
+
+# ngrok
+ngrok http 8080
 ```
 
-The setup script creates a virtual environment, installs CUDA PyTorch when an NVIDIA GPU is present (or CPU PyTorch otherwise), and handles all dependencies.
+Set `PUBLIC_HOST` in `.env` to the hostname you get (without `https://`).
 
-You also need a local LLM running:
-
-- **LM Studio:** default endpoint `http://127.0.0.1:1234/v1`
-- **Ollama:** use OpenAI-compatible endpoint `http://127.0.0.1:11434/v1`
+> **Behind a reverse proxy?** Set `NO_TLS=1` in `.env` to disable HAL's auto-generated Tailscale TLS certificates. The tunnel handles encryption — running TLS on both sides causes 502 errors.
 
 <details>
 <summary>Detailed setup guide</summary>
@@ -183,37 +203,6 @@ pip install -r requirements.txt
 
 </details>
 
-### Configure
-
-Copy the example config and fill in your values:
-
-**Windows:** `copy .env.example .env`
-**Linux / macOS:** `cp .env.example .env`
-
-Edit `.env` — the required fields are:
-
-| Variable | What it is |
-|---|---|
-| `SIGNALWIRE_PROJECT_ID` | From your SignalWire dashboard |
-| `SIGNALWIRE_TOKEN` | API token from SignalWire |
-| `SIGNALWIRE_SPACE` | Your SignalWire space name |
-| `SIGNALWIRE_PHONE_NUMBER` | The number that receives calls |
-| `PUBLIC_HOST` | Your public HTTPS hostname (see below) |
-| `OWNER_NAME` | Name HAL uses when referring to you |
-
-Optional but recommended:
-
-| Variable | What it is |
-|---|---|
-| `HF_TOKEN` | Optional Hugging Face token — useful if anonymous model download fails or is rate-limited |
-| `TTS_MODEL_DIR` | Optional local directory with pre-downloaded weights (for offline onboarding) |
-| `TTS_DEVICE` | `auto`, `cuda`, or `cpu` (default is `auto`) |
-| `TTS_VOICE_PROMPT` | Path to a WAV file (>5s) for voice cloning |
-| `NTFY_TOPIC` | [ntfy.sh](https://ntfy.sh) topic for call notifications |
-| `SIGNALWIRE_SIGNING_KEY` | Webhook signing key (falls back to `SIGNALWIRE_TOKEN` if unset) |
-
-See `.env.example` for the full list of options with defaults.
-
 ### Start your local LLM
 
 Choose one:
@@ -244,28 +233,6 @@ Required files in the bundle directory:
 - tokenizer files (`tokenizer.json`, `tokenizer_config.json`, etc.)
 
 When the bundle is present, HAL loads TTS fully local and does not call Hugging Face.
-
-### Expose your server
-
-You need a public HTTPS endpoint forwarding to port 8080:
-
-```bash
-# Tailscale Funnel (easiest if you use Tailscale)
-tailscale funnel 8080
-
-# Cloudflare Tunnel
-cloudflared tunnel --url http://localhost:8080
-
-# ngrok
-ngrok http 8080
-```
-
-Set `PUBLIC_HOST` in `.env` to the hostname you get (without `https://`).
-
-### Configure SignalWire
-
-In the [SignalWire dashboard](https://signalwire.com), set your phone number's **incoming call webhook** to:
-`https://YOUR_PUBLIC_HOST/incoming-call` (Make sure it's set to **POST** and the format is **XML**).
 
 </details>
 
@@ -337,7 +304,7 @@ Measured across 15 conversational exchanges over 3 live phone calls:
 
 | File | Purpose |
 |---|---|
-| `main.py` | Entry point — loads models, pre-records greetings, starts server |
+| `main.py` | Entry point — setup wizard, loads models, pre-records greetings, starts server |
 | `server.py` | FastAPI app — webhook, WebSocket media stream, demo endpoints, ntfy notifications |
 | `demo_ui.py` | Native FastAPI demo UI — HTML template for the HAL eye, Call status, and logs |
 | `call_handler.py` | Per-call pipeline — VAD, STT, LLM, TTS, barge-in, recording |
@@ -351,20 +318,21 @@ Measured across 15 conversational exchanges over 3 live phone calls:
 <details>
 <summary>Configuration reference</summary>
 
-All settings are configured via environment variables (`.env` file).
+All settings are configured via environment variables (`.env` file). On first run, `python main.py` launches a setup wizard that writes a complete `.env` with every field. Optional fields are included as comments with their defaults.
 
 | Variable | Default | Description |
 |---|---|---|
-| **SignalWire** | | |
-| `SIGNALWIRE_PROJECT_ID` | *(required)* | Project ID from dashboard |
-| `SIGNALWIRE_TOKEN` | *(required)* | API token |
-| `SIGNALWIRE_SPACE` | *(required)* | Space name |
-| `SIGNALWIRE_PHONE_NUMBER` | *(required)* | Phone number for inbound calls |
+| **SignalWire** | | *Required for live calls, not needed for demo* |
+| `SIGNALWIRE_PROJECT_ID` | *(none)* | Project ID from dashboard |
+| `SIGNALWIRE_TOKEN` | *(none)* | API token |
+| `SIGNALWIRE_SPACE` | *(none)* | Space name |
+| `SIGNALWIRE_PHONE_NUMBER` | *(none)* | Phone number for inbound calls |
 | `SIGNALWIRE_SIGNING_KEY` | *(uses token)* | Webhook signing key |
 | **Server** | | |
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all interfaces) |
 | `PORT` | `8080` | Bind port |
-| `PUBLIC_HOST` | *(required)* | Public hostname for WebSocket URL |
+| `PUBLIC_HOST` | *(none)* | Public hostname for WebSocket URL |
+| `NO_TLS` | *(off)* | Set to `1` to disable auto TLS (use behind reverse proxy) |
 | `MAX_CONCURRENT_CALLS` | `3` | Max simultaneous calls |
 | `MAX_CALL_DURATION_S` | `600` | Max call length in seconds |
 | **STT** | | |
@@ -382,14 +350,15 @@ All settings are configured via environment variables (`.env` file).
 | `LLM_PROVIDER` | `auto` | `auto`, `lmstudio`, `ollama`, or `openai_compatible` |
 | `LLM_BASE_URL` | `http://127.0.0.1:1234/v1` | OpenAI-compatible API endpoint |
 | `LLM_API_KEY` | `lm-studio` | API key (LM Studio ignores this) |
-| `LLM_MODEL` | `zai-org/glm-4.7-flash` | Model name |
+| `LLM_MODEL` | *(server default)* | Model name |
 | `LLM_MAX_TOKENS` | `200` | Max response tokens |
 | `LLM_TEMPERATURE` | `0.7` | Sampling temperature |
+| `LLM_FREQUENCY_PENALTY` | `0.0` | Repetition penalty |
 | **TTS** | | |
 | `HF_TOKEN` | *(none)* | Optional Hugging Face token for model download auth/rate limits |
 | `TTS_MODEL_DIR` | *(none)* | Local pre-downloaded Chatterbox model directory |
 | `TTS_DEVICE` | `auto` | `auto`, `cuda`, or `cpu` |
-| `TTS_VOICE_PROMPT` | *(none)* | Path to voice cloning WAV (>5s) |
+| `TTS_VOICE_PROMPT` | `hal9000.wav` | Path to voice cloning WAV (>5s) |
 | **VAD** | | |
 | `VAD_SPEECH_THRESHOLD` | `0.5` | Silero speech probability threshold |
 | `VAD_SILENCE_THRESHOLD_MS` | `400` | Silence duration to end utterance |
@@ -415,6 +384,8 @@ All settings are configured via environment variables (`.env` file).
 | Slow responses in CPU mode | Set `STT_MODEL=base` and `STT_COMPUTE_TYPE=int8`, and use a smaller local LLM model. |
 | `CUDA out of memory` | Use a smaller STT model (`STT_MODEL=base`) or lower precision (`STT_COMPUTE_TYPE=int8`). |
 | Connection refused on port 1234/11434 | Start your LLM server first (`LM Studio` on 1234 or `Ollama` on 11434), then run `python main.py`. |
+| 502 errors behind Cloudflare Tunnel / ngrok | Set `NO_TLS=1` in `.env` — HAL auto-generates Tailscale TLS certs which conflict with tunnel encryption. |
+| HAL starts in demo mode unexpectedly | Check `python main.py` log output — it lists exactly which production fields are missing. Fill them in `.env` and restart. |
 
 ## Acknowledgments
 
