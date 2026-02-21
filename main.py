@@ -78,52 +78,25 @@ def _resolve_runtime(stt_device: str, stt_compute_type: str, tts_device: str, cu
 
 
 def _preflight():
-    """Check for common setup issues and print helpful errors instead of tracebacks."""
+    """Check for dependency / install issues.  Exits on fatal errors only."""
     errors = []
-    from config import Config
 
-    load_dotenv = None
     try:
-        from dotenv import load_dotenv
+        from dotenv import load_dotenv  # noqa: F401
     except ImportError:
         errors.append(
             "python-dotenv is not installed. Run the setup script: "
             "setup.bat (Windows) or ./setup.sh (Linux/macOS)"
         )
 
-    # Check .env file exists
-    has_dotenv = os.path.exists(".env")
-    if not has_dotenv:
-        errors.append(
-            "No .env file found.\n"
-            "  Copy the example config and fill in your values:\n"
-            "    Windows:     copy .env.example .env\n"
-            "    Linux/macOS: cp .env.example .env"
-        )
-    elif load_dotenv:
-        load_dotenv()
-
-    # Check Python version
     if sys.version_info < (3, 12):
         errors.append(f"Python 3.12+ required, but you have {sys.version_info.major}.{sys.version_info.minor}.")
 
-    # Check PyTorch + CUDA
-    torch = None
     try:
-        import torch
+        import torch  # noqa: F401
     except ImportError:
         errors.append("PyTorch is not installed. Run the setup script: setup.bat (Windows) or ./setup.sh (Linux/macOS)")
 
-    config = Config()
-    if torch is not None:
-        try:
-            _resolve_runtime(
-                config.stt_device, config.stt_compute_type, config.tts_device, torch.cuda.is_available()
-            )
-        except ValueError as e:
-            errors.append(str(e))
-
-    # Check chatterbox version
     try:
         from chatterbox.tts_turbo import ChatterboxTurboTTS  # noqa: F401
     except ImportError:
@@ -142,29 +115,6 @@ def _preflight():
                 '    pip install --no-deps "chatterbox-tts>=0.1.5"'
             )
 
-    # Check required env vars (only if .env exists)
-    if has_dotenv:
-        required = {
-            "SIGNALWIRE_PROJECT_ID": "SignalWire project ID (from dashboard)",
-            "SIGNALWIRE_TOKEN": "SignalWire API token",
-            "SIGNALWIRE_SPACE": "SignalWire space name",
-            "SIGNALWIRE_PHONE_NUMBER": "SignalWire phone number",
-            "PUBLIC_HOST": "Public HTTPS hostname",
-            "OWNER_NAME": "Name HAL uses in greetings",
-        }
-        missing = []
-        for key, desc in required.items():
-            val = os.environ.get(key, "")
-            is_placeholder = (
-                val.startswith("your-")
-                or val == "+1XXXXXXXXXX"
-                or val == "YourName"
-            )
-            if not val or is_placeholder:
-                missing.append(f"    {key} -- {desc}")
-        if missing:
-            errors.append("Missing required settings in .env:\n" + "\n".join(missing))
-
     if errors:
         print("\n" + "=" * 60)
         print("  SETUP ISSUES DETECTED")
@@ -173,7 +123,6 @@ def _preflight():
             print(f"\n  {i}. {err}")
         print("\n" + "=" * 60)
         print("  Fix the above and try again.")
-        print("  See README.md for full setup instructions.")
         print("=" * 60 + "\n")
         sys.exit(1)
 
@@ -199,6 +148,8 @@ BANNER_DEMO = r"""
 """
 
 
+# ── Helpers for interactive setup ──
+
 def _infer_llm_provider_from_url(base_url: str) -> str:
     url = (base_url or "").strip().lower()
     if "127.0.0.1:1234" in url or "localhost:1234" in url:
@@ -208,52 +159,118 @@ def _infer_llm_provider_from_url(base_url: str) -> str:
     return "openai_compatible"
 
 
-def _demo_interactive_setup():
-    """Prompt for LLM settings if no .env exists or LLM fields are defaults.
-    Writes a minimal .env so settings persist for next run.
+def _ask(prompt: str, default: str = "") -> str:
+    """Prompt the user with an optional default shown in brackets."""
+    if default:
+        answer = input(f"  {prompt} [{default}]: ").strip()
+    else:
+        answer = input(f"  {prompt}: ").strip()
+    return answer if answer else default
+
+
+def _is_placeholder(val: str) -> bool:
+    """Return True if *val* looks like an unfilled placeholder."""
+    return (
+        not val
+        or val.startswith("your-")
+        or val in ("+1XXXXXXXXXX", "YourName")
+    )
+
+
+def _is_production_ready() -> bool:
+    """Return True when every field required for live calls is filled in."""
+    for key in ("SIGNALWIRE_PROJECT_ID", "SIGNALWIRE_TOKEN", "SIGNALWIRE_SPACE",
+                "SIGNALWIRE_PHONE_NUMBER", "PUBLIC_HOST", "OWNER_NAME"):
+        if _is_placeholder(os.environ.get(key, "").strip()):
+            return False
+    return True
+
+
+def _missing_prod_fields() -> list[tuple[str, str]]:
+    """Return [(KEY, description), ...] for every production field still empty."""
+    checks = [
+        ("SIGNALWIRE_PROJECT_ID", "SignalWire project ID"),
+        ("SIGNALWIRE_TOKEN",      "SignalWire API token"),
+        ("SIGNALWIRE_SPACE",      "SignalWire space name"),
+        ("SIGNALWIRE_PHONE_NUMBER", "SignalWire phone number"),
+        ("SIGNALWIRE_SIGNING_KEY", "SignalWire signing key (webhook security)"),
+        ("PUBLIC_HOST",           "Public hostname (e.g. caller.example.com)"),
+        ("OWNER_NAME",            "Your name (used in greetings)"),
+    ]
+    return [(k, d) for k, d in checks if _is_placeholder(os.environ.get(k, "").strip())]
+
+
+# ── Unified interactive setup ──
+
+def _interactive_setup():
+    """Walk the user through first-time configuration.
+
+    * Always writes a **complete** .env (every field present).
+    * Optional fields are included as comments showing their defaults.
+    * If the user skips the SignalWire / production section, HAL will
+      start in demo mode automatically — no need for a separate flow.
     """
     env_path = os.path.join(os.path.dirname(__file__) or ".", ".env")
-    has_dotenv = os.path.exists(env_path)
+    already_has_env = os.path.exists(env_path)
 
-    # Load existing .env if present
-    if has_dotenv:
+    # Load existing values so we can use them as defaults
+    if already_has_env:
         try:
             from dotenv import load_dotenv
-            load_dotenv(env_path)
+            load_dotenv(env_path, override=False)
         except ImportError:
             pass
 
-    # Check if demo settings look configured
-    llm_provider = os.environ.get("LLM_PROVIDER", "").strip()
+    # Determine if setup is needed at all
     llm_url = os.environ.get("LLM_BASE_URL", "").strip()
-    llm_key = os.environ.get("LLM_API_KEY", "").strip()
-    llm_model = os.environ.get("LLM_MODEL", "").strip()
-    owner = os.environ.get("OWNER_NAME", "").strip()
+    owner   = os.environ.get("OWNER_NAME", "").strip()
+    if already_has_env and llm_url and owner and not _is_placeholder(owner):
+        return  # Already configured — nothing to do
 
-    needs_setup = not has_dotenv or not llm_url or not owner
-    if not needs_setup:
-        return  # Already configured
+    # ── env helper: read existing or return empty ──
+    def _cur(key: str) -> str:
+        return os.environ.get(key, "").strip()
 
+    # ────────────────────────────────────────────────
+    #  Welcome
+    # ────────────────────────────────────────────────
     print()
-    print("  First-time setup — just a few questions.\n")
+    print("  " + "=" * 54)
+    print("   HAL Answering Service — First-Time Setup")
+    print("  " + "=" * 54)
+    print()
+    print("  This wizard will create your .env configuration file.")
+    print("  Press Enter to accept the default shown in [brackets].")
+    print("  You can always edit .env later to change any value.")
+    print()
 
-    def _ask(prompt: str, default: str) -> str:
-        display = f"  {prompt} [{default}]: " if default else f"  {prompt}: "
-        answer = input(display).strip()
-        return answer if answer else default
+    # ────────────────────────────────────────────────
+    #  1. Owner / Identity
+    # ────────────────────────────────────────────────
+    print("  --- Your Info ---")
+    print("  HAL greets callers with \"You've reached <name>'s phone.\"")
+    owner_name = _ask("Your name", _cur("OWNER_NAME") or "Dave")
+    print()
 
-    if not llm_provider:
-        llm_provider = _infer_llm_provider_from_url(llm_url) if llm_url else "lmstudio"
-
-    print("  LLM provider:")
-    print("    1) LM Studio")
-    print("    2) Ollama")
+    # ────────────────────────────────────────────────
+    #  2. LLM Provider
+    # ────────────────────────────────────────────────
+    print("  --- LLM (Language Model) ---")
+    print("  HAL needs a local LLM server for conversations.")
+    print("    1) LM Studio      (default: http://127.0.0.1:1234/v1)")
+    print("    2) Ollama          (default: http://127.0.0.1:11434/v1)")
     print("    3) Other OpenAI-compatible server")
+
+    cur_provider = _cur("LLM_PROVIDER")
     default_choice = "1"
-    if llm_provider == "ollama":
+    if cur_provider == "ollama":
         default_choice = "2"
-    elif llm_provider == "openai_compatible":
+    elif cur_provider == "openai_compatible":
         default_choice = "3"
+    elif _cur("LLM_BASE_URL"):
+        inferred = _infer_llm_provider_from_url(_cur("LLM_BASE_URL"))
+        default_choice = {"lmstudio": "1", "ollama": "2"}.get(inferred, "3")
+
     provider_choice = _ask("Choose provider", default_choice)
     if provider_choice == "2":
         llm_provider = "ollama"
@@ -262,145 +279,253 @@ def _demo_interactive_setup():
     else:
         llm_provider = "lmstudio"
 
-    default_url = llm_url
-    default_key = llm_key
-    default_model = llm_model
-    model_prompt = "LLM model name"
+    # Provider-specific defaults
     if llm_provider == "lmstudio":
-        default_url = default_url or "http://127.0.0.1:1234/v1"
-        default_key = default_key or "lm-studio"
-        model_prompt = "LLM model name (leave blank for server default)"
+        def_url = _cur("LLM_BASE_URL") or "http://127.0.0.1:1234/v1"
+        def_key = _cur("LLM_API_KEY") or "lm-studio"
+        def_model = _cur("LLM_MODEL") or ""
+        model_hint = "LLM model name (blank = server default)"
     elif llm_provider == "ollama":
-        default_url = default_url or "http://127.0.0.1:11434/v1"
-        default_key = default_key or "ollama"
-        default_model = default_model or "qwen3:4b"
-        model_prompt = "Ollama model name (must match `ollama list`, e.g. qwen3:4b)"
+        def_url = _cur("LLM_BASE_URL") or "http://127.0.0.1:11434/v1"
+        def_key = _cur("LLM_API_KEY") or "ollama"
+        def_model = _cur("LLM_MODEL") or "qwen3:4b"
+        model_hint = "Ollama model (must match `ollama list`)"
     else:
-        default_url = default_url or "http://127.0.0.1:1234/v1"
-        default_key = default_key or "local"
-        model_prompt = "LLM model name"
+        def_url = _cur("LLM_BASE_URL") or "http://127.0.0.1:1234/v1"
+        def_key = _cur("LLM_API_KEY") or "local"
+        def_model = _cur("LLM_MODEL") or ""
+        model_hint = "LLM model name"
 
-    llm_url = _ask("LLM server URL", default_url)
-    llm_key = _ask("LLM API key", default_key)
-    llm_model = _ask(model_prompt, default_model)
-    owner_name = _ask("Your name (for greetings)", owner or "Dave")
+    llm_url   = _ask("LLM server URL", def_url)
+    llm_key   = _ask("LLM API key", def_key)
+    llm_model = _ask(model_hint, def_model)
+    print()
 
-    # Auto-detect bundled TTS model dir (no prompt needed)
-    tts_model_dir = os.environ.get("TTS_MODEL_DIR", "").strip()
-    bundled_default = os.path.join(os.path.dirname(__file__) or ".", "models", "chatterbox")
-    if not tts_model_dir and os.path.isdir(bundled_default):
-        tts_model_dir = bundled_default
+    # ────────────────────────────────────────────────
+    #  3. SignalWire (production phone line)
+    # ────────────────────────────────────────────────
+    print("  --- SignalWire (Phone Line) ---")
+    print("  To answer real phone calls, HAL needs a SignalWire account.")
+    print("  Leave these blank to start in demo mode (browser mic only).")
+    print("  You can fill them in later by editing .env.\n")
 
-    # Auto-detect HAL voice prompt (ship hal9000.wav as default)
-    tts_voice = os.environ.get("TTS_VOICE_PROMPT", "").strip()
+    sw_project = _ask("SignalWire Project ID",    _cur("SIGNALWIRE_PROJECT_ID") if not _is_placeholder(_cur("SIGNALWIRE_PROJECT_ID")) else "")
+    sw_token   = _ask("SignalWire API Token",      _cur("SIGNALWIRE_TOKEN")      if not _is_placeholder(_cur("SIGNALWIRE_TOKEN"))      else "")
+    sw_space   = _ask("SignalWire Space name",     _cur("SIGNALWIRE_SPACE")      if not _is_placeholder(_cur("SIGNALWIRE_SPACE"))      else "")
+    sw_phone   = _ask("SignalWire Phone Number (e.g. +14155551234)",
+                       _cur("SIGNALWIRE_PHONE_NUMBER") if not _is_placeholder(_cur("SIGNALWIRE_PHONE_NUMBER")) else "")
+    sw_signing = _ask("SignalWire Signing Key (blank = use API token)",
+                       _cur("SIGNALWIRE_SIGNING_KEY") if not _is_placeholder(_cur("SIGNALWIRE_SIGNING_KEY")) else "")
+    print()
+
+    # ────────────────────────────────────────────────
+    #  4. Public hostname / tunnel
+    # ────────────────────────────────────────────────
+    print("  --- Public Hostname ---")
+    print("  SignalWire sends webhooks to this address.  Just the hostname,")
+    print("  no https:// prefix.  Example: caller.example.com")
+    print("  (Leave blank if you don't have one yet — demo mode still works.)\n")
+    public_host = _ask("Public hostname",
+                        _cur("PUBLIC_HOST") if not _is_placeholder(_cur("PUBLIC_HOST")) else "")
+    print()
+
+    # ────────────────────────────────────────────────
+    #  5. Server settings
+    # ────────────────────────────────────────────────
+    print("  --- Server ---")
+    host = _ask("Bind address (127.0.0.1 = local only, 0.0.0.0 = all interfaces)",
+                 _cur("HOST") or "127.0.0.1")
+    port = _ask("Port", _cur("PORT") or "8080")
+
+    # NO_TLS (helpful hint)
+    cur_no_tls = _cur("NO_TLS")
+    if not cur_no_tls and public_host:
+        # If they have a tunnel hostname, they probably want NO_TLS
+        print("\n  Tip: If you're behind Cloudflare Tunnel, ngrok, etc., the")
+        print("  tunnel already handles TLS. Disable local TLS to avoid 502 errors.")
+    no_tls = _ask("Disable local TLS? (yes if behind a tunnel)", cur_no_tls or ("yes" if public_host else "no"))
+    no_tls_val = "1" if no_tls.lower() in ("1", "true", "yes", "y") else ""
+    print()
+
+    # ────────────────────────────────────────────────
+    #  Auto-detect TTS voice / model dir (no prompt)
+    # ────────────────────────────────────────────────
+    tts_voice = _cur("TTS_VOICE_PROMPT")
     if not tts_voice:
         hal_wav = os.path.join(os.path.dirname(__file__) or ".", "hal9000.wav")
         if os.path.isfile(hal_wav):
             tts_voice = "hal9000.wav"
 
-    # Write minimal .env
-    lines = [
-        "# HAL Answering Service — config (auto-generated)",
-        "HOST=127.0.0.1",
-        "PORT=8080",
+    tts_model_dir = _cur("TTS_MODEL_DIR")
+    bundled = os.path.join(os.path.dirname(__file__) or ".", "models", "chatterbox")
+    if not tts_model_dir and os.path.isdir(bundled):
+        tts_model_dir = bundled
+
+    # ────────────────────────────────────────────────
+    #  Write COMPLETE .env
+    # ────────────────────────────────────────────────
+    env_lines = [
+        "# ══════════════════════════════════════════════════════════",
+        "# HAL Answering Service — Configuration",
+        "# ══════════════════════════════════════════════════════════",
+        "# Generated by the setup wizard.  Edit any time.",
+        "# Lines starting with # are comments / optional defaults.",
         "",
+        "# --- Owner ---",
+        f"OWNER_NAME={owner_name}",
+        "",
+        "# --- LLM (Language Model) ---",
         f"LLM_PROVIDER={llm_provider}",
         f"LLM_BASE_URL={llm_url}",
         f"LLM_API_KEY={llm_key}",
-        "STT_DEVICE=auto",
-        "STT_COMPUTE_TYPE=auto",
+        f"LLM_MODEL={llm_model}" if llm_model else "# LLM_MODEL=                # blank = server default",
+        "# LLM_MAX_TOKENS=200        # max response tokens",
+        "# LLM_TEMPERATURE=0.7       # 0.0-2.0",
+        "# LLM_FREQUENCY_PENALTY=0.0 # -2.0 to 2.0",
+        "",
+        "# --- SignalWire (required for live phone calls) ---",
+        "# Get credentials at: https://signalwire.com",
+    ]
+    if sw_project:
+        env_lines.append(f"SIGNALWIRE_PROJECT_ID={sw_project}")
+    else:
+        env_lines.append("# SIGNALWIRE_PROJECT_ID=    # your project UUID")
+    if sw_token:
+        env_lines.append(f"SIGNALWIRE_TOKEN={sw_token}")
+    else:
+        env_lines.append("# SIGNALWIRE_TOKEN=         # your API token")
+    if sw_space:
+        env_lines.append(f"SIGNALWIRE_SPACE={sw_space}")
+    else:
+        env_lines.append("# SIGNALWIRE_SPACE=         # your space name")
+    if sw_phone:
+        env_lines.append(f"SIGNALWIRE_PHONE_NUMBER={sw_phone}")
+    else:
+        env_lines.append("# SIGNALWIRE_PHONE_NUMBER=  # e.g. +14155551234")
+    if sw_signing:
+        env_lines.append(f"SIGNALWIRE_SIGNING_KEY={sw_signing}")
+    else:
+        env_lines.append("# SIGNALWIRE_SIGNING_KEY=   # blank = falls back to SIGNALWIRE_TOKEN")
+
+    env_lines += [
+        "",
+        "# --- Server ---",
+        f"HOST={host}",
+        f"PORT={port}",
+    ]
+    if public_host:
+        env_lines.append(f"PUBLIC_HOST={public_host}")
+    else:
+        env_lines.append("# PUBLIC_HOST=              # e.g. caller.example.com (no https://)")
+    if no_tls_val:
+        env_lines.append(f"NO_TLS={no_tls_val}")
+    else:
+        env_lines.append("# NO_TLS=                   # set to 1 if behind a reverse proxy / tunnel")
+
+    env_lines += [
+        "",
+        "# --- Voice / TTS (Chatterbox) ---",
+        "# Device: auto, cuda, or cpu",
         "TTS_DEVICE=auto",
     ]
-    if tts_model_dir:
-        lines.append(f"TTS_MODEL_DIR={tts_model_dir}")
     if tts_voice:
-        lines.append(f"TTS_VOICE_PROMPT={tts_voice}")
-    if llm_model:
-        lines.append(f"LLM_MODEL={llm_model}")
-    lines.append(f"OWNER_NAME={owner_name}")
-    lines.append("")  # trailing newline
+        env_lines.append(f"TTS_VOICE_PROMPT={tts_voice}")
+    else:
+        env_lines.append("# TTS_VOICE_PROMPT=hal9000.wav  # WAV file (>5s) for voice cloning")
+    if tts_model_dir:
+        env_lines.append(f"TTS_MODEL_DIR={tts_model_dir}")
+    else:
+        env_lines.append("# TTS_MODEL_DIR=            # local Chatterbox weights (skips download)")
+    env_lines.append("# HF_TOKEN=                 # Hugging Face token if anonymous download fails")
+
+    env_lines += [
+        "",
+        "# --- Speech-to-Text / Faster-Whisper ---",
+        "# STT_MODEL=large-v3-turbo  # model size (tiny/base/small/medium/large-v3-turbo)",
+        "STT_DEVICE=auto",
+        "STT_COMPUTE_TYPE=auto",
+        "# STT_LANGUAGE=en           # blank = auto-detect",
+        "# STT_BEAM_SIZE=1",
+        "# STT_BEST_OF=1",
+        "# STT_NO_SPEECH_THRESHOLD=0.6",
+        "# STT_LOG_PROB_THRESHOLD=-1.0",
+        "# STT_CONDITION_ON_PREVIOUS_TEXT=false",
+        "# STT_INITIAL_PROMPT=Phone call screening conversation.",
+        "",
+        "# --- Voice Activity Detection (Silero) ---",
+        "# VAD_SPEECH_THRESHOLD=0.5",
+        "# VAD_SILENCE_THRESHOLD_MS=400",
+        "# VAD_MIN_SPEECH_MS=250",
+        "",
+        "# --- Security ---",
+        "# MAX_CONCURRENT_CALLS=3    # simultaneous calls",
+        "# MAX_CALL_DURATION_S=600   # 10-minute max per call",
+        "",
+        "# --- Recording & Metadata ---",
+        "# RECORDINGS_DIR=recordings",
+        "# METADATA_DIR=metadata",
+        "",
+        "# --- Push Notifications (ntfy.sh, optional) ---",
+        "# NTFY_TOPIC=               # create a topic at https://ntfy.sh",
+        "# NTFY_TOKEN=               # auth token for private topics",
+        "",
+    ]
 
     with open(env_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+        f.write("\n".join(env_lines))
 
-    print(f"\n  Settings saved to {env_path}\n")
-
-    # Put them in the environment immediately
-    os.environ["LLM_PROVIDER"] = llm_provider
-    os.environ["LLM_BASE_URL"] = llm_url
-    os.environ["LLM_API_KEY"] = llm_key
-    if tts_model_dir:
-        os.environ["TTS_MODEL_DIR"] = tts_model_dir
-    if tts_voice:
-        os.environ["TTS_VOICE_PROMPT"] = tts_voice
+    # Push all values into the environment immediately
+    env_map = {
+        "OWNER_NAME": owner_name,
+        "LLM_PROVIDER": llm_provider,
+        "LLM_BASE_URL": llm_url,
+        "LLM_API_KEY": llm_key,
+        "HOST": host,
+        "PORT": port,
+    }
     if llm_model:
-        os.environ["LLM_MODEL"] = llm_model
-    os.environ["OWNER_NAME"] = owner_name
-    # Stash demo owner name so it takes priority over .env OWNER_NAME
-    os.environ["_DEMO_OWNER_NAME"] = owner_name
+        env_map["LLM_MODEL"] = llm_model
+    if sw_project:
+        env_map["SIGNALWIRE_PROJECT_ID"] = sw_project
+    if sw_token:
+        env_map["SIGNALWIRE_TOKEN"] = sw_token
+    if sw_space:
+        env_map["SIGNALWIRE_SPACE"] = sw_space
+    if sw_phone:
+        env_map["SIGNALWIRE_PHONE_NUMBER"] = sw_phone
+    if sw_signing:
+        env_map["SIGNALWIRE_SIGNING_KEY"] = sw_signing
+    if public_host:
+        env_map["PUBLIC_HOST"] = public_host
+    if no_tls_val:
+        env_map["NO_TLS"] = no_tls_val
+    if tts_voice:
+        env_map["TTS_VOICE_PROMPT"] = tts_voice
+    if tts_model_dir:
+        env_map["TTS_MODEL_DIR"] = tts_model_dir
+    for k, v in env_map.items():
+        os.environ[k] = v
 
-
-def _preflight_demo():
-    """Lightweight preflight for demo mode — skip SignalWire and PUBLIC_HOST checks."""
-    errors = []
-
-    # Check Python version
-    if sys.version_info < (3, 12):
-        errors.append(f"Python 3.12+ required, but you have {sys.version_info.major}.{sys.version_info.minor}.")
-
-    # Check python-dotenv
-    try:
-        from dotenv import load_dotenv  # noqa: F401
-    except ImportError:
-        errors.append(
-            "python-dotenv is not installed. Run the setup script: "
-            "setup.bat (Windows) or ./setup.sh (Linux/macOS)"
-        )
-
-    # Check PyTorch
-    try:
-        import torch  # noqa: F401
-    except ImportError:
-        errors.append("PyTorch is not installed. Run the setup script: setup.bat (Windows) or ./setup.sh (Linux/macOS)")
-
-    # Check chatterbox version
-    try:
-        from chatterbox.tts_turbo import ChatterboxTurboTTS  # noqa: F401
-    except ImportError:
-        try:
-            import chatterbox
-            ver = getattr(chatterbox, "__version__", "unknown")
-            errors.append(
-                f"chatterbox-tts {ver} is too old (missing tts_turbo module).\n"
-                "  Upgrade to >=0.1.5:\n"
-                '    pip install --no-deps "chatterbox-tts>=0.1.5"'
-            )
-        except ImportError:
-            errors.append(
-                "chatterbox-tts is not installed.\n"
-                "  Install it with:\n"
-                '    pip install --no-deps "chatterbox-tts>=0.1.5"'
-            )
-
-    if errors:
-        print("\n" + "=" * 60)
-        print("  SETUP ISSUES DETECTED")
-        print("=" * 60)
-        for i, err in enumerate(errors, 1):
-            print(f"\n  {i}. {err}")
-        print("\n" + "=" * 60)
-        print("  Fix the above and try again.")
-        print("=" * 60 + "\n")
-        sys.exit(1)
-
-
-def _has_signalwire_creds() -> bool:
-    """Check if SignalWire credentials are configured (not placeholders)."""
-    for key in ("SIGNALWIRE_PROJECT_ID", "SIGNALWIRE_TOKEN", "SIGNALWIRE_SPACE"):
-        val = os.environ.get(key, "").strip()
-        if not val or val.startswith("your-"):
-            return False
-    return True
+    # ── Summary ──
+    print("  " + "=" * 54)
+    print(f"  Config saved to {env_path}")
+    print("  " + "=" * 54)
+    has_sw = all([sw_project, sw_token, sw_space, sw_phone])
+    if has_sw and public_host and owner_name:
+        print("  Mode: PRODUCTION (live phone calls)")
+    else:
+        print("  Mode: DEMO (browser mic)")
+        missing = []
+        if not has_sw:
+            missing.append("SignalWire credentials")
+        if not public_host:
+            missing.append("PUBLIC_HOST")
+        if not owner_name:
+            missing.append("OWNER_NAME")
+        if missing:
+            print(f"  To enable live calls, fill in: {', '.join(missing)}")
+            print("  Just edit .env and restart — no re-setup needed.")
+    print()
 
 
 def _resolve_ssl(config, args) -> tuple:
@@ -413,6 +538,10 @@ def _resolve_ssl(config, args) -> tuple:
     """
     import shutil
     import subprocess
+
+    # 0. Explicit disable (useful behind Cloudflare Tunnel / reverse proxy)
+    if os.environ.get("NO_TLS", "").strip().lower() in ("1", "true", "yes"):
+        return None, None, None
 
     # 1. Explicit CLI / env
     certfile = getattr(args, "ssl_cert", None) or os.environ.get("SSL_CERTFILE", "").strip()
@@ -453,33 +582,45 @@ def _resolve_ssl(config, args) -> tuple:
 def main():
     parser = argparse.ArgumentParser(description="HAL Answering Service")
     parser.add_argument("--demo", action="store_true",
-                        help="Start in demo mode (browser mic, no SignalWire needed)")
+                        help="Force demo mode (browser mic, no SignalWire needed)")
     parser.add_argument("--host", type=str, default=None,
-                        help="Bind address (default: 0.0.0.0 for --demo, else from HOST env)")
+                        help="Bind address (default: 0.0.0.0 for demo, else from HOST env)")
     parser.add_argument("--ssl-cert", type=str, default=None,
                         help="Path to SSL certificate file (also: SSL_CERTFILE env)")
     parser.add_argument("--ssl-key", type=str, default=None,
                         help="Path to SSL private key file (also: SSL_KEYFILE env)")
     args = parser.parse_args()
 
-    # Load .env early so auto-detection can check SignalWire creds
+    # Load .env early so auto-detection can check existing values
     try:
         from dotenv import load_dotenv
         load_dotenv()
     except ImportError:
         pass
 
-    # Auto-detect demo mode: if no --demo flag, check for SignalWire creds
-    is_demo = args.demo or not _has_signalwire_creds()
+    # ── Dependency check (fatal errors only) ──
+    _preflight()
+
+    # ── Interactive setup (first run, or .env incomplete) ──
+    _interactive_setup()
+
+    # ── Re-load .env in case setup just wrote / rewrote it ──
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+    except ImportError:
+        pass
+
+    # ── Decide mode: demo unless ALL production fields are present ──
+    is_demo = args.demo or not _is_production_ready()
 
     if is_demo and not args.demo:
-        log.info("No SignalWire credentials found — starting in demo mode automatically")
-
-    if is_demo:
-        _preflight_demo()
-        _demo_interactive_setup()
-    else:
-        _preflight()
+        missing = _missing_prod_fields()
+        if missing:
+            log.info("Demo mode — missing fields for live calls: %s",
+                     ", ".join(k for k, _ in missing))
+        else:
+            log.info("Starting in demo mode (--demo flag)")
 
     import uvicorn
     from config import Config
@@ -499,11 +640,7 @@ def main():
 
     if is_demo:
         config.demo_mode = True
-        # Use the name from interactive setup, or default to "Dave"
-        demo_owner = os.environ.get("_DEMO_OWNER_NAME", "").strip()
-        if demo_owner:
-            config.owner_name = demo_owner
-        elif not config.owner_name or config.owner_name in ("YourName", ""):
+        if not config.owner_name or _is_placeholder(config.owner_name):
             config.owner_name = "Dave"
         # Default to all-interfaces so the demo is accessible from LAN
         if args.host is None and config.host == "127.0.0.1":
