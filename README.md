@@ -213,26 +213,15 @@ Choose one:
 
 Recommended models: anything fast with good instruction following. The default is `zai-org/glm-4.7-flash`.
 
-### Bundle Chatterbox Weights (offline onboarding)
+### Offline / air-gapped TTS
 
-To avoid runtime model downloads, ship a local model bundle and point HAL at it:
+By default, Chatterbox downloads model weights from Hugging Face on first run. To pre-bundle them (useful for offline deployment or avoiding rate limits):
 
 ```bash
-# Download once into a distributable local folder
 python scripts/prefetch_chatterbox.py --output models/chatterbox
 ```
 
-Set one of:
-- `TTS_MODEL_DIR=models/chatterbox` in `.env`, or
-- leave `TTS_MODEL_DIR` unset and place files in `models/chatterbox` (auto-detected).
-
-Required files in the bundle directory:
-- `ve.safetensors`
-- `t3_turbo_v1.safetensors`
-- `s3gen_meanflow.safetensors`
-- tokenizer files (`tokenizer.json`, `tokenizer_config.json`, etc.)
-
-When the bundle is present, HAL loads TTS fully local and does not call Hugging Face.
+HAL auto-detects the `models/chatterbox` directory. You can also set `TTS_MODEL_DIR` in `.env` to point elsewhere.
 
 </details>
 
