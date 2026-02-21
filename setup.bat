@@ -127,6 +127,11 @@ if errorlevel 1 (
 :: ── Done ────────────────────────────────────────────────
 echo.
 echo [+] Setup complete! Next steps:
-echo   1. Start your LLM server      (e.g. LM Studio or Ollama)
-echo   2. python main.py             (HAL will walk you through the rest)
+echo.
+echo   1. Activate the virtual environment (required every new terminal):
+echo.
+echo        venv\Scripts\activate
+echo.
+echo   2. Start your LLM server      (e.g. LM Studio or Ollama)
+echo   3. python main.py             (HAL will walk you through the rest)
 

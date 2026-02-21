@@ -59,9 +59,17 @@ git clone https://github.com/ninjahuttjr/hal-answering-service.git
 cd hal-answering-service
 ```
 
-**Windows:** `setup.bat` &nbsp;|&nbsp; **Linux/macOS:** `chmod +x setup.sh && ./setup.sh`
+**Windows:**
+```powershell
+setup.bat
+venv\Scripts\activate
+python main.py
+```
 
+**Linux / macOS:**
 ```bash
+chmod +x setup.sh && ./setup.sh
+source venv/bin/activate
 python main.py
 ```
 
