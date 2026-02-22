@@ -63,9 +63,13 @@ def _looks_like_extra_body_issue(exc: Exception) -> bool:
 
 
 def _sanitize(text: str) -> str:
-    """Strip known garbage tokens from LLM output."""
+    """Strip known garbage tokens and leaked role prefixes from LLM output."""
     cleaned = _GARBAGE_RE.sub('', text)
-    return re.sub(r'\s+', ' ', cleaned).strip()
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    # Strip leaked role prefixes (e.g. "HAL:", "Caller:", "Assistant:") that
+    # smaller LLMs copy from few-shot examples or conversation history.
+    cleaned = re.sub(r'^(?:HAL|Caller|Assistant)\s*:\s*', '', cleaned, flags=re.IGNORECASE).strip()
+    return cleaned
 
 
 def _has_real_words(text: str) -> bool:
